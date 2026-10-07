@@ -14,8 +14,17 @@ def _minutes(n=2000, seed=0):
     high = np.maximum(open_, close) + rng.uniform(0, 10, n)
     low = np.minimum(open_, close) - rng.uniform(0, 10, n)
     vol = rng.uniform(5, 50, n)
-    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close,
-                         "volume": vol, "taker_buy_base": vol * rng.uniform(0.3, 0.7, n)}, index=idx)
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": vol,
+            "taker_buy_base": vol * rng.uniform(0.3, 0.7, n),
+        },
+        index=idx,
+    )
 
 
 def test_fee_formula():
@@ -48,16 +57,18 @@ def test_proxy_target_uses_minute_before_and_last_minute():
 
 def test_fill_prices_and_simulation():
     markets = pd.DataFrame({"slug": ["a", "b"], "start_ts": [1000, 1300], "outcome_up": [True, False]})
-    trades = pd.DataFrame({
-        "slug": ["a", "a", "a", "b", "b"],
-        "ts": [1001, 1003, 990, 1302, 1302],
-        "side": ["BUY", "BUY", "BUY", "BUY", "SELL"],
-        "outcome": ["Up", "Up", "Up", "Down", "Down"],
-        "price": [0.50, 0.54, 0.40, 0.45, 0.10],
-        "size": [10, 10, 100, 20, 50],
-    })
+    trades = pd.DataFrame(
+        {
+            "slug": ["a", "a", "a", "b", "b"],
+            "ts": [1001, 1003, 990, 1302, 1302],
+            "side": ["BUY", "BUY", "BUY", "BUY", "SELL"],
+            "outcome": ["Up", "Up", "Up", "Down", "Down"],
+            "price": [0.50, 0.54, 0.40, 0.45, 0.10],
+            "size": [10, 10, 100, 20, 50],
+        }
+    )
     px = fill_prices(trades, markets, 1, 5)
-    assert px.loc["a", "px_up"] == pytest.approx(0.52)   # la operación de t=990 queda fuera
+    assert px.loc["a", "px_up"] == pytest.approx(0.52)  # la operación de t=990 queda fuera
     assert px.loc["b", "px_down"] == pytest.approx(0.45)  # las ventas no cuentan
     p_up = pd.Series({"a": 0.60, "b": 0.30})
     bets = simulate(markets, p_up, px, margin=0.02, stake=5)
@@ -72,6 +83,7 @@ def test_fill_prices_and_simulation():
 
 def test_paper_decide_matches_backtest_rule():
     from phoenix.btc5m.paper import decide
+
     side, price, edge = decide(0.60, 0.52, 0.49, margin=0.02)
     assert side == "Up" and price == 0.52
     assert edge == pytest.approx(0.60 - 0.52 - fee_per_share(0.52))

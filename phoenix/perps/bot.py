@@ -12,6 +12,7 @@ Uso:
   python -m phoenix.perps.bot --mode demo           # opera en la cuenta demo (dinero ficticio)
   python -m phoenix.perps.bot --mode live --i-accept-losing-everything   # dinero real
 """
+
 from __future__ import annotations
 
 import argparse
@@ -76,7 +77,9 @@ class Bot:
     def __init__(self, exchange, config: Config, state_path: Path, log: logging.Logger):
         self.x, self.cfg, self.state_path, self.log = exchange, config, state_path, log
         self.st = State.load(state_path)
-        self.strategy = breakout(trend_filter=True, pyramid=True, max_leverage=config.max_leverage, memory=self.st.memory)
+        self.strategy = breakout(
+            trend_filter=True, pyramid=True, max_leverage=config.max_leverage, memory=self.st.memory
+        )
 
     # --- utilidades ---
     def _qty(self, equity: float, lev: float, price: float) -> float:
@@ -152,14 +155,19 @@ class Bot:
         self.st.stop_failures += 1
         alive = self._stop_alive()
         if alive is True:  # no se pudo mover el stop, pero el anterior sigue vivo: protegida, se reintenta
-            self.log.error("No se pudo mover el stop a %.0f; sigue activo el anterior. Se reintenta en el próximo ciclo.", stop)
+            self.log.error(
+                "No se pudo mover el stop a %.0f; sigue activo el anterior. Se reintenta en el próximo ciclo.", stop
+            )
         elif alive is False or self.st.stop_failures >= self.cfg.stop_unverified_cycles:
             self.log.critical("No se pudo asegurar el stop a %.0f: cierre a mercado y aborto.", stop)
             self._finish("ABORTADO: no se pudo asegurar el stop, posición cerrada a mercado")
             return False
         else:
-            self.log.error("No se pudo colocar NI verificar el stop (%d/%d ciclos).",
-                           self.st.stop_failures, self.cfg.stop_unverified_cycles)
+            self.log.error(
+                "No se pudo colocar NI verificar el stop (%d/%d ciclos).",
+                self.st.stop_failures,
+                self.cfg.stop_unverified_cycles,
+            )
         self.st.save(self.state_path)
         return False
 
@@ -190,8 +198,10 @@ class Bot:
         equity = self.x.equity()
         if self.st.started is None:
             if equity > self.cfg.max_start_equity:
-                raise RuntimeError(f"La cuenta tiene {equity:.2f} $, más de {self.cfg.max_start_equity} $: "
-                                   "deja solo el dinero que quieres arriesgar o sube max_start_equity.")
+                raise RuntimeError(
+                    f"La cuenta tiene {equity:.2f} $, más de {self.cfg.max_start_equity} $: "
+                    "deja solo el dinero que quieres arriesgar o sube max_start_equity."
+                )
             self.st.started, self.st.start_equity = now.isoformat(), equity
             self.x.set_leverage(self.cfg.max_leverage)
             self.log.info("Inicio con %.2f $. Objetivo %.2f $ en %d días.", equity, self._target(), self.cfg.days)
@@ -250,7 +260,9 @@ class Bot:
         if add * price / self.cfg.max_leverage * factor <= avail:
             return add
         capped = math.floor(avail * self.cfg.max_leverage / factor / price / LOT) * LOT
-        self.log.warning("Margen disponible %.2f $ insuficiente para +%.4f BTC: se añade %.4f BTC.", avail, add, max(capped, 0.0))
+        self.log.warning(
+            "Margen disponible %.2f $ insuficiente para +%.4f BTC: se añade %.4f BTC.", avail, add, max(capped, 0.0)
+        )
         return capped if capped >= LOT else 0.0
 
     def _execute(self, plan: Plan, pos: Pos | None, equity: float, price: float):
@@ -263,8 +275,12 @@ class Bot:
         candle = self.st.last_candle
         if pos is None:
             if not self._stop_ok(plan.side, plan.stop, price):
-                self.log.warning("Señal %s descartada: stop %s inválido o del lado equivocado del precio %.0f.",
-                                 plan.side, plan.stop, price)
+                self.log.warning(
+                    "Señal %s descartada: stop %s inválido o del lado equivocado del precio %.0f.",
+                    plan.side,
+                    plan.stop,
+                    price,
+                )
                 return
             qty = self._qty(equity, plan.leverage, price)
             if qty < LOT:
@@ -273,8 +289,14 @@ class Bot:
             self._intend_stop(plan.stop)  # a disco ANTES del fill
             fill = self.x.market(plan.side, qty, client_id=self._cid("entry", candle, plan.side))
             pos = self.x.position() or Pos(plan.side, qty, fill)
-            self.log.info("ABRE %s %.4f BTC a %.0f, stop %.0f (%.1fx)", "LARGO" if plan.side == 1 else "CORTO",
-                          qty, fill, plan.stop, qty * fill / equity)
+            self.log.info(
+                "ABRE %s %.4f BTC a %.0f, stop %.0f (%.1fx)",
+                "LARGO" if plan.side == 1 else "CORTO",
+                qty,
+                fill,
+                plan.stop,
+                qty * fill / equity,
+            )
         else:
             if not (math.isfinite(plan.stop) and plan.stop > 0):
                 self.log.warning("Plan con stop inválido (%s): se ignora y se mantiene el stop actual.", plan.stop)
@@ -299,6 +321,7 @@ class Bot:
         self.x.set_take_profit(pos, tp, client_id=self._cid("tp", candle, pos.side, f"{pos.qty:.4f}", round(tp)))
         self.log.info("Stop en %.0f, objetivo en %.0f", plan.stop, tp)
 
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["dry", "demo", "live"], default="dry")
@@ -310,8 +333,11 @@ def main():
         raise SystemExit("Para operar con dinero real añade --i-accept-losing-everything")
 
     LOG_DIR.mkdir(exist_ok=True)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s",
-                        handlers=[logging.FileHandler(LOG_DIR / f"perps_bot_{a.mode}.log"), logging.StreamHandler()])
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(message)s",
+        handlers=[logging.FileHandler(LOG_DIR / f"perps_bot_{a.mode}.log"), logging.StreamHandler()],
+    )
     log = logging.getLogger("perps")
     x = PaperPerp(a.dry_equity, client=public_client()) if a.mode == "dry" else KrakenPerp(a.mode)
     if a.check:

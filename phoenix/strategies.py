@@ -3,6 +3,7 @@
 Todas usan el mismo esquema de salida para poder compararse: SL = sl_k * ATR,
 TP = tp_m * SL, cierre por tiempo a las `max_bars` velas.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -11,8 +12,9 @@ import pandas as pd
 
 def _orders(index, side, feats, sl_k, tp_m, max_bars) -> pd.DataFrame:
     sl = sl_k * feats["atr"]
-    return pd.DataFrame({"side": np.asarray(side, int), "sl_dist": sl, "tp_dist": tp_m * sl,
-                         "max_bars": max_bars}, index=index)
+    return pd.DataFrame(
+        {"side": np.asarray(side, int), "sl_dist": sl, "tp_dist": tp_m * sl, "max_bars": max_bars}, index=index
+    )
 
 
 def random_orders(bars, feats, *, seed=0, prob=0.03, sl_k=1.0, tp_m=1.5, max_bars=16):
@@ -58,8 +60,19 @@ def breakeven_prob(tp_m: float, cost_r: float) -> float:
     return (1.0 + cost_r) / (tp_m + 1.0)
 
 
-def range_breakout_orders(bars, feats, *, tz="Europe/London", range_start=7.0, range_end=8.0, trade_end=11.0,
-                          trend_filter=False, sl_k=1.0, tp_m=1.5, max_bars=16):
+def range_breakout_orders(
+    bars,
+    feats,
+    *,
+    tz="Europe/London",
+    range_start=7.0,
+    range_end=8.0,
+    trade_end=11.0,
+    trend_filter=False,
+    sl_k=1.0,
+    tp_m=1.5,
+    max_bars=16,
+):
     """Ruptura de un rango horario (por defecto Londres 07:00-08:00), una por día.
 
     `trend_filter`: solo a favor de la tendencia de H4 (dist_ema50 de H4 con el mismo signo).

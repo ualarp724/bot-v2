@@ -39,8 +39,9 @@ def test_server_to_utc_us_dst_week():
 
 def _bars(times, **over):
     idx = pd.DatetimeIndex(pd.to_datetime(times), tz="UTC")
-    df = pd.DataFrame({"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5,
-                       "tick_volume": 1.0, "spread_points": 7.0}, index=idx)
+    df = pd.DataFrame(
+        {"open": 10.0, "high": 11.0, "low": 9.0, "close": 10.5, "tick_volume": 1.0, "spread_points": 7.0}, index=idx
+    )
     for k, v in over.items():
         df[k] = v
     return df

@@ -2,6 +2,7 @@
 
 El perpetuo de Kraken sigue al índice de BTC; para señales de 4 h la diferencia con Binance es mínima.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,7 +22,9 @@ def download(start: str = "2019-01") -> int:
     for month in pd.period_range(start, end.to_period("M") - 1, freq="M"):
         n += _get(f"{BASE}/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-{month}.zip", DATA_DIR / f"BTCUSDT-1h-{month}.zip")
     for day in pd.date_range(end.to_period("M").start_time, end - pd.Timedelta(days=1), freq="D"):
-        n += _get(f"{BASE}/daily/klines/BTCUSDT/1h/BTCUSDT-1h-{day:%Y-%m-%d}.zip", DATA_DIR / f"BTCUSDT-1h-{day:%Y-%m-%d}.zip")
+        n += _get(
+            f"{BASE}/daily/klines/BTCUSDT/1h/BTCUSDT-1h-{day:%Y-%m-%d}.zip", DATA_DIR / f"BTCUSDT-1h-{day:%Y-%m-%d}.zip"
+        )
     return n
 
 

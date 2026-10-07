@@ -22,6 +22,7 @@ def _once(plan):
             done["x"] = True
             return plan
         return None
+
     return strat
 
 
@@ -160,8 +161,10 @@ def _wick_candles():
 
 def _next_candle(c, step=20.0):
     last = c["close"].iloc[-1]
-    row = pd.DataFrame({"open": last, "high": last + 50, "low": last - 50, "close": last + step, "volume": 1.0},
-                       index=[c.index[-1] + pd.Timedelta(hours=4)])
+    row = pd.DataFrame(
+        {"open": last, "high": last + 50, "low": last - 50, "close": last + step, "volume": 1.0},
+        index=[c.index[-1] + pd.Timedelta(hours=4)],
+    )
     return pd.concat([c, row])
 
 
@@ -269,6 +272,7 @@ def test_unverifiable_stop_does_not_liquidate_a_protected_position(tmp_path, mon
 
     def boom():
         raise ConnectionError("fetch_open_orders caído")
+
     monkeypatch.setattr(x, "stop_price", boom, raising=False)
     assert bot.step(c, now=now)
     assert x.pos is not None and not bot.st.finished and x.stop is not None
@@ -306,8 +310,16 @@ def test_bot_neither_trades_nor_finishes_when_equity_is_unavailable(tmp_path):
 
 # --- KrakenPerp contra un ccxt simulado (sin red) ---
 class FakeEx:
-    def __init__(self, orders=None, fail_create=False, create_returns_id=True, fail_cancel=False, balance=None,
-                 create_response=None, raise_duplicate=False):
+    def __init__(
+        self,
+        orders=None,
+        fail_create=False,
+        create_returns_id=True,
+        fail_cancel=False,
+        balance=None,
+        create_response=None,
+        raise_duplicate=False,
+    ):
         self.orders = list(orders or [])
         self.fail_create, self.create_returns_id, self.fail_cancel = fail_create, create_returns_id, fail_cancel
         self.balance, self.log = balance, []
@@ -332,8 +344,11 @@ class FakeEx:
             return self.create_response
         if not self.create_returns_id:
             return {}
-        o = {"id": f"new{len(self.log)}", "triggerPrice": params.get("stopLossPrice"),
-             "clientOrderId": params.get("clientOrderId")}
+        o = {
+            "id": f"new{len(self.log)}",
+            "triggerPrice": params.get("stopLossPrice"),
+            "clientOrderId": params.get("clientOrderId"),
+        }
         if "stopLossPrice" in params:
             self.orders.append(o)
         return o
@@ -397,15 +412,19 @@ def test_equity_reads_flex_portfolio_value():
     assert _kraken(FakeEx(balance=bal)).equity() == pytest.approx(114.5)
 
 
-@pytest.mark.parametrize("bal", [
-    {"info": {"accounts": {"flex": {}}}, "total": {}},                    # flex sin ningún valor
-    {"info": {}, "total": {}},                                            # respuesta vacía
-    {"info": {"accounts": {"flex": {"portfolioValue": "abc"}}}, "total": {}},   # no numérico
-    {"info": {"accounts": {"flex": {"portfolioValue": float("nan")}}}, "total": {}},
-    {"info": {"accounts": {"flex": {"portfolioValue": -5.0}}}, "total": {}},
-])
+@pytest.mark.parametrize(
+    "bal",
+    [
+        {"info": {"accounts": {"flex": {}}}, "total": {}},  # flex sin ningún valor
+        {"info": {}, "total": {}},  # respuesta vacía
+        {"info": {"accounts": {"flex": {"portfolioValue": "abc"}}}, "total": {}},  # no numérico
+        {"info": {"accounts": {"flex": {"portfolioValue": float("nan")}}}, "total": {}},
+        {"info": {"accounts": {"flex": {"portfolioValue": -5.0}}}, "total": {}},
+    ],
+)
 def test_equity_raises_instead_of_returning_zero_silently(bal):
     from phoenix.perps.exchange import EquityUnavailable
+
     with pytest.raises(EquityUnavailable):
         _kraken(FakeEx(balance=bal)).equity()
 
@@ -432,27 +451,49 @@ def test_equity_invalid_flex_value_falls_back_to_total_usd_with_warnings(caplog)
     assert len(caplog.records) == 2  # el valor inválido y el uso del fallback
 
 
-@pytest.mark.parametrize("bal", [
-    None,                                                       # balance nulo
-    {},                                                         # balance vacío
-    {"info": {"accounts": {}}, "total": {"USD": 0.0}},          # 0.0 no es un valor computable (¿colateral en otra divisa?)
-    {"info": {"accounts": {}}, "total": {"USD": None}},
-    {"info": {"accounts": {}}, "total": {"USD": float("nan")}},
-    {"info": {"accounts": {}}, "total": {"USD": -3.0}},
-    {"info": {"accounts": {}}, "total": {"USD": "n/a"}},
-])
+@pytest.mark.parametrize(
+    "bal",
+    [
+        None,  # balance nulo
+        {},  # balance vacío
+        {"info": {"accounts": {}}, "total": {"USD": 0.0}},  # 0.0 no es un valor computable (¿colateral en otra divisa?)
+        {"info": {"accounts": {}}, "total": {"USD": None}},
+        {"info": {"accounts": {}}, "total": {"USD": float("nan")}},
+        {"info": {"accounts": {}}, "total": {"USD": -3.0}},
+        {"info": {"accounts": {}}, "total": {"USD": "n/a"}},
+    ],
+)
 def test_equity_still_raises_when_nothing_computable(bal):
     from phoenix.perps.exchange import EquityUnavailable
+
     with pytest.raises(EquityUnavailable):
         _kraken(FakeEx(balance=bal)).equity()
 
 
 # --- reduceOnly obligatorio en stops y órdenes condicionales de salida ---
 _FAKE_MARKET = {
-    "id": "PF_XBTUSD", "symbol": "BTC/USD:USD", "base": "BTC", "quote": "USD", "settle": "USD", "baseId": "BTC",
-    "quoteId": "USD", "settleId": "usd", "type": "swap", "spot": False, "margin": False, "swap": True, "future": False,
-    "option": False, "contract": True, "linear": True, "inverse": False, "active": True, "contractSize": 1,
-    "precision": {"amount": 0.0001, "price": 1.0}, "limits": {"amount": {"min": 0.0001}, "price": {}, "cost": {}}, "info": {},
+    "id": "PF_XBTUSD",
+    "symbol": "BTC/USD:USD",
+    "base": "BTC",
+    "quote": "USD",
+    "settle": "USD",
+    "baseId": "BTC",
+    "quoteId": "USD",
+    "settleId": "usd",
+    "type": "swap",
+    "spot": False,
+    "margin": False,
+    "swap": True,
+    "future": False,
+    "option": False,
+    "contract": True,
+    "linear": True,
+    "inverse": False,
+    "active": True,
+    "contractSize": 1,
+    "precision": {"amount": 0.0001, "price": 1.0},
+    "limits": {"amount": {"min": 0.0001}, "price": {}, "cost": {}},
+    "info": {},
 }
 
 
@@ -485,6 +526,7 @@ def test_close_all_sends_a_reduce_only_market_order():
 def test_stop_and_tp_params_become_reduce_only_orders_in_the_real_ccxt_request():
     """Los params que manda KrakenPerp, pasados por el código REAL de ccxt, llevan reduceOnly en la request."""
     import ccxt
+
     ex = FakeEx([])
     k = _kraken(ex)
     k.set_stop(LONG, 59000.0)
@@ -500,6 +542,7 @@ def test_stop_and_tp_params_become_reduce_only_orders_in_the_real_ccxt_request()
 # --- id de orden verificable ---
 def test_order_id_is_extracted_defensively():
     from phoenix.perps.exchange import _order_id
+
     assert _order_id({"id": "a"}) == "a"
     assert _order_id({"id": None, "info": {"order_id": "b"}}) == "b"
     assert _order_id({"info": {"orderId": "c"}}) == "c"
@@ -515,12 +558,19 @@ def test_set_stop_accepts_an_id_found_only_in_the_raw_response():
     assert ("cancel", "old") in ex.log  # confirmado por info.order_id: ya se puede retirar el anterior
 
 
-@pytest.mark.parametrize("response", [
-    {},                                                                                        # nada
-    {"id": None, "status": "rejected", "info": {"status": "invalidPrice", "orderEvents": []}},  # rechazo de ccxt sin id
-    {"id": "x1", "status": "rejected"},                                                         # id pero rechazada
-    {"id": "x2", "status": "canceled"},
-])
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},  # nada
+        {
+            "id": None,
+            "status": "rejected",
+            "info": {"status": "invalidPrice", "orderEvents": []},
+        },  # rechazo de ccxt sin id
+        {"id": "x1", "status": "rejected"},  # id pero rechazada
+        {"id": "x2", "status": "canceled"},
+    ],
+)
 def test_unverifiable_stop_is_a_placement_failure_and_keeps_the_previous_stop(response):
     ex = FakeEx([OLD_STOP], create_response=response)
     with pytest.raises(OrderNotConfirmed):
@@ -592,7 +642,9 @@ def _bot_on_sim(sim, tmp_path):
 
 def test_end_to_end_unverifiable_stop_triggers_retries_and_fail_safe_close(tmp_path, no_sleep):
     """Bot real + KrakenPerp real + ccxt simulado que rechaza el stop SIN id: reintentos y cierre a mercado."""
-    sim = ExchangeSim(stop_response={"id": None, "status": "rejected", "info": {"status": "invalidPrice", "orderEvents": []}})
+    sim = ExchangeSim(
+        stop_response={"id": None, "status": "rejected", "info": {"status": "invalidPrice", "orderEvents": []}}
+    )
     bot, c, now = _bot_on_sim(sim, tmp_path)
     assert bot.step(c, now=now) is False
     assert sim.pos is None and bot.st.finished
@@ -681,13 +733,20 @@ def _flex_balance(**flex):
 def test_available_margin_reads_flex_and_is_none_when_unknown():
     assert _kraken(FakeEx(balance=_flex_balance(availableMargin="37.5"))).available_margin() == pytest.approx(37.5)
     assert _kraken(FakeEx(balance=_flex_balance(availableMargin=-4.0))).available_margin() == 0.0  # sin margen
-    for bal in (_flex_balance(), _flex_balance(availableMargin=None), _flex_balance(availableMargin="abc"),
-                _flex_balance(availableMargin=float("nan")), None, {}):
+    for bal in (
+        _flex_balance(),
+        _flex_balance(availableMargin=None),
+        _flex_balance(availableMargin="abc"),
+        _flex_balance(availableMargin=float("nan")),
+        None,
+        {},
+    ):
         assert _kraken(FakeEx(balance=bal)).available_margin() is None
 
 
 def test_client_order_ids_are_deterministic_unique_and_valid_uuids(tmp_path):
     import uuid
+
     bot = _bot_with(PaperPerp(114.0), tmp_path)
     c0, c1 = "2026-01-01T00:00:00+00:00", "2026-01-01T04:00:00+00:00"
     a = bot._cid("entry", c0, 1)
@@ -707,7 +766,9 @@ def test_stop_retry_after_a_timeout_that_did_apply_does_not_duplicate_the_stop(t
     assert len(stops) == 1 and sim.pos is not None and not bot.st.finished
     assert len([x for x in sim.created if "stopLossPrice" in x[4]]) == 2  # el original y un único reintento
     assert sim.accepted_stops == 1, "el exchange aceptó más de un stop: hubo una ventana con stops duplicados"
-    assert len({x[4]["clientOrderId"] for x in sim.created if "stopLossPrice" in x[4]}) == 1  # mismo id en los dos intentos
+    assert (
+        len({x[4]["clientOrderId"] for x in sim.created if "stopLossPrice" in x[4]}) == 1
+    )  # mismo id en los dos intentos
     assert bot.st.stop_synced and bot.st.stop_failures == 0
 
 
@@ -809,6 +870,8 @@ def test_pyramiding_is_limited_by_the_available_margin(tmp_path):
     zero, _, _ = _pyramid_run(tmp_path / "c", avail=0.0)
     unknown, _, _ = _pyramid_run(tmp_path / "d", avail=None)
     assert full.pos.qty > partial.pos.qty > q0  # con margen justo se añade menos
-    assert zero.pos.qty == pytest.approx(q0) and unknown.pos.qty == pytest.approx(q0)  # sin margen o sin dato: no se piramida
+    assert zero.pos.qty == pytest.approx(q0) and unknown.pos.qty == pytest.approx(
+        q0
+    )  # sin margen o sin dato: no se piramida
     for x in (full, partial, zero, unknown):
         assert x.stop > s0  # pero el stop sí se sube siempre

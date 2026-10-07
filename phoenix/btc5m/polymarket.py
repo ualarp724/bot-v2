@@ -9,6 +9,7 @@
 Todo se guarda por días en data/raw/polymarket/ y las descargas se reanudan solas.
 Solo lectura: aquí no se opera.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,7 +30,7 @@ CLOB = "https://clob.polymarket.com"
 SERIES_ID = 10684
 HEADERS = {"User-Agent": "Mozilla/5.0 (phoenix-research)", "Accept": "application/json"}
 TRADES_BEFORE_S = 120  # segundos antes del inicio
-TRADES_AFTER_S = 60    # segundos después del inicio
+TRADES_AFTER_S = 60  # segundos después del inicio
 
 
 def get_json(url: str, params: dict | None = None, retries: int = 5):
@@ -42,12 +43,12 @@ def get_json(url: str, params: dict | None = None, retries: int = 5):
                 return json.load(r)
         except urllib.error.HTTPError as e:
             if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             raise
         except (urllib.error.URLError, TimeoutError):
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             raise
 
@@ -58,7 +59,9 @@ def parse_event(e: dict) -> dict | None:
     m = e["markets"][0]
     outcomes = json.loads(m["outcomes"]) if isinstance(m["outcomes"], str) else m["outcomes"]
     tokens = json.loads(m["clobTokenIds"]) if isinstance(m["clobTokenIds"], str) else m["clobTokenIds"]
-    prices = json.loads(m["outcomePrices"]) if isinstance(m.get("outcomePrices"), str) else (m.get("outcomePrices") or [])
+    prices = (
+        json.loads(m["outcomePrices"]) if isinstance(m.get("outcomePrices"), str) else (m.get("outcomePrices") or [])
+    )
     up_i = outcomes.index("Up")
     meta = e.get("eventMetadata") or {}
     resolved = m.get("umaResolutionStatus") == "resolved" and len(prices) == 2
@@ -82,19 +85,35 @@ def markets_for_day(day: pd.Timestamp) -> pd.DataFrame:
     for h in range(0, 24, 6):  # tramos de 6 h = 72 mercados (< 100 por llamada)
         a = day + pd.Timedelta(hours=h)
         b = a + pd.Timedelta(hours=6) - pd.Timedelta(seconds=1)
-        evs = get_json(f"{GAMMA}/events", {"series_id": SERIES_ID, "limit": 100,
-                                           "end_date_min": a.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                           "end_date_max": b.strftime("%Y-%m-%dT%H:%M:%SZ")})
+        evs = get_json(
+            f"{GAMMA}/events",
+            {
+                "series_id": SERIES_ID,
+                "limit": 100,
+                "end_date_min": a.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_date_max": b.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            },
+        )
         rows += [r for r in map(parse_event, evs) if r]
     df = pd.DataFrame(rows)
     return df.drop_duplicates("slug").sort_values("start_ts").reset_index(drop=True) if len(df) else df
 
 
 def trades_around_start(condition_id: str, start_ts: int) -> list[dict]:
-    d = get_json(f"{DATA_API}/trades", {"market": condition_id, "start": start_ts - TRADES_BEFORE_S,
-                                         "end": start_ts + TRADES_AFTER_S, "limit": 10000})
-    return [{"ts": t["timestamp"], "side": t["side"], "outcome": t["outcome"],
-             "price": float(t["price"]), "size": float(t["size"])} for t in d]
+    d = get_json(
+        f"{DATA_API}/trades",
+        {"market": condition_id, "start": start_ts - TRADES_BEFORE_S, "end": start_ts + TRADES_AFTER_S, "limit": 10000},
+    )
+    return [
+        {
+            "ts": t["timestamp"],
+            "side": t["side"],
+            "outcome": t["outcome"],
+            "price": float(t["price"]),
+            "size": float(t["size"]),
+        }
+        for t in d
+    ]
 
 
 def download_day(day: pd.Timestamp, workers: int = 8) -> tuple[int, int]:
@@ -126,8 +145,9 @@ def download_day(day: pd.Timestamp, workers: int = 8) -> tuple[int, int]:
     return len(markets), len(trades)
 
 
-def load_buys_near_start(start: str | None = None, end: str | None = None,
-                         rel_from: int = -60, rel_to: int = 15) -> pd.DataFrame:
+def load_buys_near_start(
+    start: str | None = None, end: str | None = None, rel_from: int = -60, rel_to: int = 15
+) -> pd.DataFrame:
     """Compras de takers entre inicio + rel_from y inicio + rel_to (s). Carga día a día para no llenar la memoria."""
     parts = []
     for f in sorted(DATA_DIR.glob("trades_*.csv.gz")):

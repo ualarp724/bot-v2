@@ -5,6 +5,7 @@ primero, cierre antes de pausas y por tiempo), para que lo que aprende el modelo
 sea lo que luego se opera. Las etiquetas SÍ miran el futuro (es su función):
 nunca se usan como features y se purgan en el borde entre entrenamiento y validación.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -14,8 +15,9 @@ from phoenix.costs import spread_usd
 from phoenix.settings import Settings
 
 
-def tp_first_labels(bars: pd.DataFrame, sl_dist: pd.Series, tp_dist: pd.Series,
-                    max_bars: int, settings: Settings) -> pd.DataFrame:
+def tp_first_labels(
+    bars: pd.DataFrame, sl_dist: pd.Series, tp_dist: pd.Series, max_bars: int, settings: Settings
+) -> pd.DataFrame:
     """Columnas long / short: 1 si ese lado llega al TP antes que al SL, 0 si no, NaN si no se puede saber."""
     ins, costs = settings.instrument, settings.costs
     slip = costs.slippage_per_market_fill_usd

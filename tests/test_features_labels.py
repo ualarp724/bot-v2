@@ -20,8 +20,17 @@ def _bars(n=1500, seed=3):
     open_ = np.concatenate([[2600], close[:-1]])
     high = np.maximum(open_, close) + rng.uniform(0, 1.5, n)
     low = np.minimum(open_, close) - rng.uniform(0, 1.5, n)
-    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close,
-                         "tick_volume": rng.integers(50, 500, n).astype(float), "spread_points": 12.0}, index=idx)
+    return pd.DataFrame(
+        {
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "tick_volume": rng.integers(50, 500, n).astype(float),
+            "spread_points": 12.0,
+        },
+        index=idx,
+    )
 
 
 def test_features_have_no_lookahead():

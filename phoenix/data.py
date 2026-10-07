@@ -6,6 +6,7 @@ Convenciones:
 - La hora del servidor de Vantage es la hora de Nueva York + 7 h (GMT+2 en
   invierno, GMT+3 en verano), así que se pasa a UTC a través de America/New_York.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,8 +26,14 @@ def read_mt5_csv(path: str | Path) -> pd.DataFrame:
     if len(df.columns) < 2:
         df = pd.read_csv(path, sep=",")
     df.columns = [c.strip("<>").upper() for c in df.columns]
-    rename = {"OPEN": "open", "HIGH": "high", "LOW": "low", "CLOSE": "close",
-              "TICKVOL": "tick_volume", "SPREAD": "spread_points"}
+    rename = {
+        "OPEN": "open",
+        "HIGH": "high",
+        "LOW": "low",
+        "CLOSE": "close",
+        "TICKVOL": "tick_volume",
+        "SPREAD": "spread_points",
+    }
     missing = {"DATE", "TIME", *rename} - set(df.columns)
     if missing:
         raise ValueError(f"Faltan columnas en {path}: {sorted(missing)}")
@@ -97,9 +104,13 @@ def validate_bars(df: pd.DataFrame, bar_minutes: int) -> ValidationReport:
         last=idx.max() if len(df) else None,
         duplicates=int(idx.duplicated().sum()),
         non_monotonic=int((diffs < pd.Timedelta(0)).sum()),
-        bad_ohlc=int(((df["high"] < df[["open", "close"]].max(axis=1))
-                      | (df["low"] > df[["open", "close"]].min(axis=1))
-                      | (df["high"] < df["low"])).sum()),
+        bad_ohlc=int(
+            (
+                (df["high"] < df[["open", "close"]].max(axis=1))
+                | (df["low"] > df[["open", "close"]].min(axis=1))
+                | (df["high"] < df["low"])
+            ).sum()
+        ),
         non_positive=int((df[["open", "high", "low", "close"]] <= 0).any(axis=1).sum()),
         unexpected_gaps=pd.Series(unexpected, dtype="timedelta64[ns]"),
     )
@@ -109,9 +120,11 @@ def clean_bars(df: pd.DataFrame) -> pd.DataFrame:
     """Ordena, quita duplicados (se queda con el primero) y filas con OHLC imposible."""
     out = df.sort_index()
     out = out[~out.index.duplicated(keep="first")]
-    ok = ((out["high"] >= out[["open", "close"]].max(axis=1))
-          & (out["low"] <= out[["open", "close"]].min(axis=1))
-          & (out[["open", "high", "low", "close"]] > 0).all(axis=1))
+    ok = (
+        (out["high"] >= out[["open", "close"]].max(axis=1))
+        & (out["low"] <= out[["open", "close"]].min(axis=1))
+        & (out[["open", "high", "low", "close"]] > 0).all(axis=1)
+    )
     return out[ok]
 
 
@@ -125,7 +138,7 @@ def load_bars(path: str | Path, settings: Settings) -> pd.DataFrame:
 def dev_data(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     """Periodo de desarrollo (fase 3). Nunca incluye el test."""
     s = settings.splits
-    return df.loc[s.dev_start:s.dev_end]
+    return df.loc[s.dev_start : s.dev_end]
 
 
 def holdout_data(df: pd.DataFrame, settings: Settings, *, i_know_this_is_the_final_test: bool = False) -> pd.DataFrame:
@@ -133,4 +146,4 @@ def holdout_data(df: pd.DataFrame, settings: Settings, *, i_know_this_is_the_fin
     if not i_know_this_is_the_final_test:
         raise PermissionError("El test es intocable hasta la fase 4 (ver el plan).")
     s = settings.splits
-    return df.loc[s.test_start:s.test_end]
+    return df.loc[s.test_start : s.test_end]

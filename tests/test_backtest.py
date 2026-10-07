@@ -47,7 +47,7 @@ def test_same_bar_sl_and_tp_assumes_sl():
 def test_short_uses_ask_for_exits():
     bars = _bars([[100, 100, 100, 100], [100, 100.5, 99.5, 100], [100, 100.2, 89.0, 90], [90, 90, 90, 90]])
     t = run_backtest(bars, _orders(bars, {0: (-1, 5, 10, 10)}), S, risk_usd=RISK).trades.iloc[0]
-    assert t.entry == pytest.approx(99.95)          # vende al bid menos desliz
+    assert t.entry == pytest.approx(99.95)  # vende al bid menos desliz
     assert t.reason == "tp" and t.exit == pytest.approx(89.95)  # ask (bid 89 + 0,12) <= 89,95
     assert t.pnl_usd == pytest.approx(10 - 0.06)
 
@@ -70,8 +70,10 @@ def test_time_exit_and_one_position_at_a_time():
 
 def test_closes_before_market_break_and_never_enters_across_it():
     idx = pd.DatetimeIndex(["2025-01-06 21:30", "2025-01-06 21:45", "2025-01-06 23:00", "2025-01-06 23:15"], tz="UTC")
-    bars = pd.DataFrame({"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0,
-                         "tick_volume": 1.0, "spread_points": 12.0}, index=idx)
+    bars = pd.DataFrame(
+        {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "tick_volume": 1.0, "spread_points": 12.0},
+        index=idx,
+    )
     orders = _orders(bars, {0: (1, 5, 10, 10), 1: (1, 5, 10, 10)})
     tr = run_backtest(bars, orders, S, risk_usd=RISK).trades
     assert len(tr) == 1
@@ -91,9 +93,11 @@ def test_future_bars_do_not_change_past_trades():
     bars = _bars(rows)
     sig = {i: (1 if i % 2 else -1, 2, 3, 8) for i in range(0, 300, 7)}
     full = run_backtest(bars, _orders(bars, sig), S, risk_usd=RISK).trades
-    half = run_backtest(bars.iloc[:150], _orders(bars.iloc[:150], {k: v for k, v in sig.items() if k < 150}), S, risk_usd=RISK).trades
+    half = run_backtest(
+        bars.iloc[:150], _orders(bars.iloc[:150], {k: v for k, v in sig.items() if k < 150}), S, risk_usd=RISK
+    ).trades
     done = half[half.exit_time < bars.index[149]]
-    pd.testing.assert_frame_equal(full.iloc[:len(done)].reset_index(drop=True), done.reset_index(drop=True))
+    pd.testing.assert_frame_equal(full.iloc[: len(done)].reset_index(drop=True), done.reset_index(drop=True))
 
 
 def test_metrics():

@@ -1,4 +1,5 @@
 """Métricas de un backtest. Todo se calcula sobre operaciones cerradas."""
+
 from __future__ import annotations
 
 import numpy as np

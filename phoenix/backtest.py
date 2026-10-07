@@ -16,6 +16,7 @@ Reglas (ver fase 2 del plan):
   semana o festivo), así nunca se queda nada abierto de noche.
 - Riesgo fijo en USD por operación (sin interés compuesto): mide la ventaja.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -37,8 +38,9 @@ class BacktestResult:
     skipped_min_lot: int
 
 
-def run_backtest(bars: pd.DataFrame, orders: pd.DataFrame, settings: Settings,
-                 risk_usd: float | None = None) -> BacktestResult:
+def run_backtest(
+    bars: pd.DataFrame, orders: pd.DataFrame, settings: Settings, risk_usd: float | None = None
+) -> BacktestResult:
     """Ejecuta las órdenes sobre las velas y devuelve la lista de operaciones."""
     if not orders.index.equals(bars.index):
         raise ValueError("orders debe tener exactamente el mismo índice que bars")
@@ -123,12 +125,24 @@ def run_backtest(bars: pd.DataFrame, orders: pd.DataFrame, settings: Settings,
 
         gross = (exit_px - entry) * size * lots * side
         pnl = gross - commission_usd(lots, costs)
-        trades.append({
-            "signal_time": idx[t], "entry_time": idx[e], "exit_time": idx[k],
-            "side": int(side), "entry": entry, "exit": exit_px, "sl": sl, "tp": tp,
-            "lots": lots, "risk_usd": sl_d * size * lots, "pnl_usd": pnl,
-            "r": pnl / (sl_d * size * lots), "reason": reason, "bars": k - e + 1,
-        })
+        trades.append(
+            {
+                "signal_time": idx[t],
+                "entry_time": idx[e],
+                "exit_time": idx[k],
+                "side": int(side),
+                "entry": entry,
+                "exit": exit_px,
+                "sl": sl,
+                "tp": tp,
+                "lots": lots,
+                "risk_usd": sl_d * size * lots,
+                "pnl_usd": pnl,
+                "r": pnl / (sl_d * size * lots),
+                "reason": reason,
+                "bars": k - e + 1,
+            }
+        )
         t = k + 1  # la siguiente señal se busca a partir de la vela posterior a la salida
 
     return BacktestResult(pd.DataFrame(trades), risk, settings.account.capital_usd, skipped)

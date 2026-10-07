@@ -4,6 +4,7 @@ Todas devuelven un `Plan` (o None para no hacer nada) al cierre de cada vela.
 El tamaño se fija por riesgo: apalancamiento = riesgo_por_operación / distancia_al_stop,
 limitado al máximo del exchange.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -26,8 +27,11 @@ def add_indicators(b: pd.DataFrame, ema_span: int = 300) -> pd.DataFrame:
 
 
 def resample(bars: pd.DataFrame, rule: str) -> pd.DataFrame:
-    return bars.resample(rule, label="left", closed="left").agg(
-        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna()
+    return (
+        bars.resample(rule, label="left", closed="left")
+        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+        .dropna()
+    )
 
 
 def load_4h(bars1h: pd.DataFrame) -> pd.DataFrame:
@@ -39,8 +43,16 @@ def _lev(risk: float, entry: float, stop: float) -> float:
     return risk / max(abs(entry - stop) / entry, 1e-6)
 
 
-def breakout(n_entry=20, n_exit=10, stop_atr=2.0, risk=0.30, trend_filter=False, pyramid=False,
-             max_leverage=10.0, memory: dict | None = None):
+def breakout(
+    n_entry=20,
+    n_exit=10,
+    stop_atr=2.0,
+    risk=0.30,
+    trend_filter=False,
+    pyramid=False,
+    max_leverage=10.0,
+    memory: dict | None = None,
+):
     """Ruptura de canal (Donchian). Salida por el canal contrario o stop de ATR. Opcional: filtro de
     tendencia de ~50 días y piramidar (volver a ponerse al máximo apalancamiento cada +1 ATR).
     `memory` guarda el precio de la última compra para piramidar (el bot lo persiste en disco)."""
@@ -78,12 +90,14 @@ def breakout(n_entry=20, n_exit=10, stop_atr=2.0, risk=0.30, trend_filter=False,
 def bold_trend(stop_pct=0.04, lev=10.0):
     """'Todo o nada': siempre dentro a favor de la tendencia de ~50 días, apalancamiento máximo,
     stop fijo; tras un stop vuelve a entrar en la vela siguiente."""
+
     def strat(st):
         r, pos = st["row"], st["pos"]
         if pos is not None or not np.isfinite(r["ema_trend"]):
             return None
         side = 1 if r["close"] > r["ema_trend"] else -1
         return Plan(side, r["close"] * (1 - side * stop_pct), lev)
+
     return strat
 
 

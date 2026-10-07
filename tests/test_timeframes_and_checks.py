@@ -12,8 +12,9 @@ def _random_bars(n=400, start="2025-01-06 00:00"):
     open_ = np.concatenate([[2600], close[:-1]])
     high = np.maximum(open_, close) + rng.uniform(0, 1, n)
     low = np.minimum(open_, close) - rng.uniform(0, 1, n)
-    return pd.DataFrame({"open": open_, "high": high, "low": low, "close": close,
-                         "tick_volume": 1.0, "spread_points": 7.0}, index=idx)
+    return pd.DataFrame(
+        {"open": open_, "high": high, "low": low, "close": close, "tick_volume": 1.0, "spread_points": 7.0}, index=idx
+    )
 
 
 def test_h1_is_assigned_only_when_closed():
@@ -36,6 +37,7 @@ def test_incomplete_last_candle_is_not_used():
 
 def test_checker_passes_correct_mtf():
     bars = _random_bars()
+
     def fn(b):
         return higher_tf_closed(b, "1h")["close"]
 

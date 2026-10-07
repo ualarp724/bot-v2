@@ -6,6 +6,7 @@
   Crea las claves SIN permiso de retirada.
 - PaperPerp: cuenta simulada en memoria para el modo "dry" y los tests; usa velas públicas.
 """
+
 from __future__ import annotations
 
 import logging
@@ -29,8 +30,8 @@ class EquityUnavailable(RuntimeError):
 
 @dataclass
 class Pos:
-    side: int      # +1 largo, -1 corto
-    qty: float     # BTC
+    side: int  # +1 largo, -1 corto
+    qty: float  # BTC
     entry: float
 
 
@@ -49,6 +50,7 @@ def _finite(x) -> float | None:
 def _is_duplicate(e: Exception) -> bool:
     """Kraken contestó clientOrderIdAlreadyExist (ccxt lo mapea a DuplicateOrderId)."""
     import ccxt
+
     return isinstance(e, ccxt.DuplicateOrderId)
 
 
@@ -94,6 +96,7 @@ def _load_env():
 
 def public_client():
     import ccxt
+
     return ccxt.krakenfutures({"requests_trust_env": True, "enableRateLimit": True})
 
 
@@ -120,6 +123,7 @@ def candles_4h(client, n: int = 1200) -> pd.DataFrame:
 class KrakenPerp:
     def __init__(self, mode: str = "demo"):
         import ccxt
+
         if mode not in ("demo", "live"):
             raise ValueError("mode debe ser 'demo' o 'live'")
         _load_env()
@@ -127,7 +131,9 @@ class KrakenPerp:
         key, secret = os.environ.get(f"{prefix}_KEY"), os.environ.get(f"{prefix}_SECRET")
         if not key or not secret:
             raise RuntimeError(f"Faltan {prefix}_KEY / {prefix}_SECRET en el entorno o en .env")
-        self.ex = ccxt.krakenfutures({"apiKey": key, "secret": secret, "requests_trust_env": True, "enableRateLimit": True})
+        self.ex = ccxt.krakenfutures(
+            {"apiKey": key, "secret": secret, "requests_trust_env": True, "enableRateLimit": True}
+        )
         if mode == "demo":
             self.ex.set_sandbox_mode(True)
         self.ex.load_markets()
@@ -161,11 +167,16 @@ class KrakenPerp:
             _log.warning("equity: flex.%s no es un valor válido (%r); se ignora", k, flex[k])
         usd = _finite((bal.get("total") or {}).get("USD"))
         if usd is not None and usd > 0:
-            _log.warning("equity: sin flex.portfolioValue; se usa total['USD']=%.2f (cantidad de colateral USD, "
-                         "no incluye el PnL no realizado)", usd)
+            _log.warning(
+                "equity: sin flex.portfolioValue; se usa total['USD']=%.2f (cantidad de colateral USD, "
+                "no incluye el PnL no realizado)",
+                usd,
+            )
             return usd
-        raise EquityUnavailable("la respuesta de Kraken no trae un capital computable "
-                                "(flex.portfolioValue/balanceValue/marginEquity ni total['USD'])")
+        raise EquityUnavailable(
+            "la respuesta de Kraken no trae un capital computable "
+            "(flex.portfolioValue/balanceValue/marginEquity ni total['USD'])"
+        )
 
     def position(self) -> Pos | None:
         for p in self.ex.fetch_positions([SYMBOL]):
@@ -228,8 +239,11 @@ class KrakenPerp:
         stop vigente sigue protegiendo la posición (antes se cancelaba primero y un fallo la dejaba sin stop).
         Con `client_id` es idempotente: si el intento anterior sí llegó (timeout tras aplicarse), Kraken contesta
         'ya existe'; se da por colocado solo si esa orden está realmente abierta."""
-        previous = [o["id"] for o in self.ex.fetch_open_orders(SYMBOL)
-                    if _is_stop(o) and not (client_id and o.get("clientOrderId") == client_id)]
+        previous = [
+            o["id"]
+            for o in self.ex.fetch_open_orders(SYMBOL)
+            if _is_stop(o) and not (client_id and o.get("clientOrderId") == client_id)
+        ]
         params = {"stopLossPrice": round(stop), "triggerSignal": "mark", "reduceOnly": True}
         if client_id:
             params["clientOrderId"] = client_id
@@ -240,8 +254,12 @@ class KrakenPerp:
             if not (client_id and _is_duplicate(e)):
                 raise
             if not self._has_open_order(client_id):
-                raise OrderNotConfirmed(f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él") from e
-            _log.warning("set_stop: el clientOrderId %s ya existe y está abierto: el intento anterior sí llegó", client_id)
+                raise OrderNotConfirmed(
+                    f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él"
+                ) from e
+            _log.warning(
+                "set_stop: el clientOrderId %s ya existe y está abierto: el intento anterior sí llegó", client_id
+            )
         for oid in previous:
             try:
                 self.ex.cancel_order(oid, SYMBOL)
@@ -254,13 +272,17 @@ class KrakenPerp:
         if client_id:
             params["clientOrderId"] = client_id
         try:
-            order = self.ex.create_order(SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price), params)
+            order = self.ex.create_order(
+                SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price), params
+            )
             _confirmed_id(order, "el take profit")
         except Exception as e:
             if not (client_id and _is_duplicate(e)):
                 raise
             if not self._has_open_order(client_id):
-                raise OrderNotConfirmed(f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él") from e
+                raise OrderNotConfirmed(
+                    f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él"
+                ) from e
             _log.warning("set_take_profit: el clientOrderId %s ya existe y está abierto", client_id)
 
     def close_all(self):
@@ -345,7 +367,7 @@ class PaperPerp:
         if self.pos is not None and self.stop is not None:
             s = self.pos.side
             if (lo <= self.stop) if s == 1 else (h >= self.stop):
-                self.last = (min(o, self.stop) if s == 1 else max(o, self.stop))
+                self.last = min(o, self.stop) if s == 1 else max(o, self.stop)
                 self.close_all()
             elif self.tp is not None and ((h >= self.tp) if s == 1 else (lo <= self.tp)):
                 self.last = self.tp
