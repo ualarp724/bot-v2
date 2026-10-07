@@ -271,9 +271,9 @@ def test_unverifiable_stop_does_not_liquidate_a_protected_position(tmp_path, mon
     bot.step(c, now=now)
 
     def boom():
-        raise ConnectionError("fetch_open_orders caído")
+        raise ConnectionError("fetch_open_orders caído")  # el exchange no responde: no se puede verificar el stop
 
-    monkeypatch.setattr(x, "stop_price", boom, raising=False)
+    monkeypatch.setattr(x, "stops", boom)
     assert bot.step(c, now=now)
     assert x.pos is not None and not bot.st.finished and x.stop is not None
 
@@ -326,8 +326,11 @@ class FakeEx:
         self.created = []  # (tipo, lado, cantidad, precio, params) de CADA create_order recibido
         self.create_response = create_response  # respuesta fija de create_order (p. ej. un rechazo sin id)
         self.raise_duplicate = raise_duplicate  # create_order responde clientOrderIdAlreadyExist
+        self.degraded = False  # fetch_open_orders recibe una respuesta SIN la lista 'openOrders'
+        self.last_json_response = None
 
     def fetch_open_orders(self, symbol):
+        self.last_json_response = {"result": "success"} if self.degraded else {"openOrders": list(self.orders)}
         return list(self.orders)
 
     def fetch_ticker(self, symbol):
@@ -348,6 +351,8 @@ class FakeEx:
             "id": f"new{len(self.log)}",
             "triggerPrice": params.get("stopLossPrice"),
             "clientOrderId": params.get("clientOrderId"),
+            "side": side,
+            "amount": amount,
         }
         if "stopLossPrice" in params:
             self.orders.append(o)
@@ -586,11 +591,12 @@ def test_unconfirmed_take_profit_raises():
 class ExchangeSim(FakeEx):
     """ccxt simulado con posición y órdenes: lo justo para que KrakenPerp trabaje dentro de Bot."""
 
-    def __init__(self, equity=114.0, last=87000.0, stop_response=None, timeout_after_effect=0):
+    def __init__(self, equity=114.0, last=87000.0, stop_response=None, timeout_after_effect=0, fail_close=0):
         super().__init__(balance={"info": {"accounts": {"flex": {"portfolioValue": str(equity)}}}, "total": {}})
         self.last, self.pos, self.stop_response = last, None, stop_response
         self.seen_cids, self.timeout_after_effect = set(), timeout_after_effect  # N stops se aplican y luego "timeout"
         self.accepted_stops = 0  # stops que el exchange ACEPTÓ en total (aunque luego se cancelen)
+        self.fail_close = fail_close  # cierres reduce-only a mercado que fallan (sin aplicarse) antes de funcionar
 
     def fetch_ticker(self, symbol):
         return {"last": self.last}
@@ -608,6 +614,9 @@ class ExchangeSim(FakeEx):
         self.created.append((typ, side, amount, price, dict(params)))
         n = len(self.created)
         cid = params.get("clientOrderId")
+        if typ == "market" and params.get("reduceOnly") and "stopLossPrice" not in params and self.fail_close > 0:
+            self.fail_close -= 1
+            raise ConnectionError("el cierre a mercado no llegó")
         if cid is not None:
             if cid in self.seen_cids:
                 raise ccxt.DuplicateOrderId("krakenfutures: createOrder failed due to clientOrderIdAlreadyExist")
@@ -615,7 +624,8 @@ class ExchangeSim(FakeEx):
         if "stopLossPrice" in params:
             if self.stop_response is not None:
                 return self.stop_response
-            o = {"id": f"stop{n}", "status": "open", "triggerPrice": params["stopLossPrice"], "clientOrderId": cid}
+            o = {"id": f"stop{n}", "status": "open", "triggerPrice": params["stopLossPrice"], "clientOrderId": cid,
+                 "side": side, "amount": amount}  # fmt: skip
             self.orders.append(o)
             self.accepted_stops += 1
             if self.timeout_after_effect > 0:
@@ -623,7 +633,7 @@ class ExchangeSim(FakeEx):
                 raise ConnectionError("timeout: la orden se aplicó pero la respuesta no llegó")
             return o
         if typ == "limit":
-            o = {"id": f"tp{n}", "status": "open", "price": price, "clientOrderId": cid}
+            o = {"id": f"tp{n}", "status": "open", "price": price, "clientOrderId": cid, "side": side, "amount": amount}
             self.orders.append(o)
             return o
         if params.get("reduceOnly"):
@@ -875,3 +885,232 @@ def test_pyramiding_is_limited_by_the_available_margin(tmp_path):
     )  # sin margen o sin dato: no se piramida
     for x in (full, partial, zero, unknown):
         assert x.stop > s0  # pero el stop sí se sube siempre
+
+
+# =====================================================================================================
+# Revisión adversarial de las fases 1 y 2: parches de los hallazgos confirmados (cada test falla sin su arreglo)
+# =====================================================================================================
+class EquityFlaky(FlakyStop):
+    equity_fails = False
+
+    def equity(self):
+        if self.equity_fails:
+            raise ConnectionError("fetch_balance caído")
+        return super().equity()
+
+
+def _boom(*_a, **_k):
+    raise ConnectionError("el exchange no responde")
+
+
+def _open_long(tmp_path, x=None):
+    x = x or FlakyStop(114.0, fail_times=0)
+    bot = _bot_with(x, tmp_path)
+    c = _trend_candles()
+    x.last = float(c["close"].iloc[-1])
+    now = c.index[-1] + pd.Timedelta(hours=4)
+    assert bot.step(c, now=now) and x.pos is not None and x.stop is not None
+    return bot, x, c, now
+
+
+def test_stop_is_reconciled_even_when_reading_the_capital_fails(tmp_path, no_sleep):
+    """SM-F1: equity() se leía antes de reconciliar; si fallaba, la posición se quedaba sin stop mientras durase."""
+    bot, x, c, now = _open_long(tmp_path, EquityFlaky(114.0, fail_times=0))
+    x.stop, x.equity_fails = None, True  # el stop desaparece y, a la vez, no se puede leer el capital
+    _cycle(bot, c, now)
+    assert x.stop is not None and x.stop == pytest.approx(bot.st.stop)
+
+
+def test_close_all_closes_first_and_leaves_the_stop_in_place_if_the_close_fails():
+    """SM-F2 / KR-F1: se cancelaban stops y TP ANTES de cerrar; un cierre fallido dejaba la posición desnuda."""
+    ex = ExchangeSim(fail_close=1)
+    ex.pos = {"contracts": 0.01, "side": "long", "entryPrice": 60000.0}
+    ex.orders = [{"id": "s1", "triggerPrice": 58000.0, "side": "sell", "amount": 0.01}]
+    k = _kraken(ex)
+    with pytest.raises(ConnectionError):
+        k.close_all()
+    assert ex.pos is not None and [o["id"] for o in ex.orders] == ["s1"]  # sigue protegida
+    k.close_all()  # al reintentar cierra y solo entonces cancela lo pendiente
+    assert ex.pos is None and ex.orders == []
+
+
+def test_target_reached_with_a_failing_close_keeps_the_protection_until_it_closes(tmp_path, no_sleep):
+    sim = ExchangeSim(fail_close=2)
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    assert bot.step(c, now=now)
+    sim.balance = {"info": {"accounts": {"flex": {"portfolioValue": "1000"}}}, "total": {}}  # supera el objetivo
+    for _ in range(2):  # el cierre falla dos veces: la posición debe seguir con su stop
+        _cycle(bot, c, now)
+        assert sim.pos is not None and any(o.get("triggerPrice") for o in sim.orders)
+    assert _cycle(bot, c, now) is False and sim.pos is None and bot.st.finished
+
+
+def test_partial_stop_cover_is_detected_and_replaced_with_the_full_size(tmp_path, no_sleep):
+    """SM-F3: 'stop vivo' solo miraba existencia; tras piramidar, una parte de la posición quedaba sin stop."""
+    sim = ExchangeSim()
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    bot.step(c, now=now)
+    qty0 = sim.pos["contracts"]
+    sim.pos["contracts"] = qty0 * 1.5  # la posición crece y el stop sigue con la cantidad vieja
+    assert bot.step(c, now=now) is True
+    stops = [o for o in sim.orders if o.get("triggerPrice")]
+    assert len(stops) == 1 and stops[0]["amount"] == pytest.approx(qty0 * 1.5)
+
+
+def test_partial_cover_that_cannot_be_fixed_closes_the_position(tmp_path, no_sleep):
+    sim = ExchangeSim()
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    bot.step(c, now=now)
+    sim.pos["contracts"] *= 1.5
+    sim.stop_response = {"id": None, "status": "rejected", "info": {"status": "invalidPrice", "orderEvents": []}}
+    assert bot.step(c, now=now) is False
+    assert sim.pos is None and bot.st.finished
+
+
+def test_failure_counter_does_not_accumulate_while_the_old_stop_covers_the_position(tmp_path, monkeypatch, no_sleep):
+    """SM-F4: stop_failures subía aunque el stop viejo estuviera verificado; un único fallo de lectura cerraba todo."""
+    bot, x, c, now = _open_long(tmp_path)
+    old_stop = x.stop
+    c2 = _next_candle(c, step=600.0)
+    x.last = float(c2["close"].iloc[-1])
+    x.fail_times = 99
+    for _ in range(6):  # el trailing falla 6 ciclos con el stop viejo vivo
+        _cycle(bot, c2, now)
+    assert x.pos is not None and not bot.st.finished and x.stop == old_stop and bot.st.stop_failures == 0
+    monkeypatch.setattr(x, "stops", _boom)  # y ahora UN fallo puntual al consultar
+    _cycle(bot, c2, now)
+    assert x.pos is not None and not bot.st.finished and bot.st.stop_failures <= 1
+
+
+def test_unverifiable_stop_closes_the_position_only_after_n_cycles(tmp_path, monkeypatch, no_sleep):
+    bot, x, c, now = _open_long(tmp_path)
+    bot.st.stop_synced = False  # hay un stop pendiente de confirmar
+    x.fail_times = 99
+    monkeypatch.setattr(x, "stops", _boom)  # y no se puede ni colocar NI verificar
+    for k in range(1, bot.cfg.stop_unverified_cycles):
+        assert _cycle(bot, c, now) is True and x.pos is not None, f"cierre prematuro en el ciclo {k}"
+    assert _cycle(bot, c, now) is False and x.pos is None and bot.st.finished
+
+
+def test_failure_counter_resets_after_a_successful_placement(tmp_path, monkeypatch, no_sleep):
+    bot, x, c, now = _open_long(tmp_path)
+    bot.st.stop_synced = False
+    x.fail_times = 99
+    real_stops, down = x.stops, {"on": True}
+    monkeypatch.setattr(x, "stops", lambda: _boom() if down["on"] else real_stops())
+    for _ in range(2):
+        _cycle(bot, c, now)
+    assert bot.st.stop_failures == 2
+    x.fail_times, down["on"] = 0, False  # vuelve la red
+    _cycle(bot, c, now)
+    assert bot.st.stop_synced and bot.st.stop_failures == 0
+
+
+def test_an_existing_stop_is_adopted_when_the_state_is_lost_instead_of_being_loosened(tmp_path, no_sleep):
+    """SM-F5: con st.stop=None la estrategia veía el stop de emergencia (-4 %) y el bot aflojaba el stop real."""
+    bot, x, c, now = _open_long(tmp_path)
+    old = x.stop
+    bot.st.stop = None
+    bot.st.save(bot.state_path)  # se pierde el stop del estado (reinicio con un state.json antiguo)
+    c2 = _next_candle(c)
+    x.last = float(c2["close"].iloc[-1])
+    assert bot.step(c2, now=now)
+    assert bot.st.stop is not None and bot.st.stop >= old - 1e-9 and x.stop >= old - 1e-9  # nunca más lejos
+
+
+def test_a_pending_stop_already_crossed_by_the_price_exits_instead_of_freezing(tmp_path, no_sleep):
+    """SM-F7: el reconcile reintentaba un stop pendiente sin validarlo contra el precio y la estrategia se congelaba."""
+    bot, x, c, now = _open_long(tmp_path)
+    old = x.stop
+    bot.st.stop, bot.st.stop_synced = old + 50.0, False  # intención de subir el stop...
+    x.last = old + 20.0  # ...pero el precio ya cayó por debajo de ese nivel (aún por encima del stop viejo)
+    assert _cycle(bot, c, now) is True
+    assert x.pos is None and not bot.st.finished and bot.st.stop is None and x.fills[-1][3] is True
+
+
+def test_strategy_is_not_consulted_while_the_stop_is_unsynced(tmp_path, no_sleep):
+    bot, x, c, now = _open_long(tmp_path)
+    bot.st.stop_synced = False
+    x.fail_times = 99
+    calls = []
+    bot.strategy = lambda ctx: calls.append(1)
+    c2 = _next_candle(c)
+    x.last = float(c2["close"].iloc[-1])
+    assert _cycle(bot, c2, now) is True and calls == []  # vela nueva con el stop pendiente: no se opera
+    x.fail_times = 0
+    assert _cycle(bot, c2, now) is True and calls == [1]  # ya sincronizado: se opera esa vela
+
+
+def test_degraded_open_orders_response_is_unknown_not_empty(tmp_path, no_sleep):
+    """KR-F2: ccxt convierte una respuesta sin 'openOrders' en []: parecía que no había ningún stop."""
+    from phoenix.perps.exchange import OrdersUnavailable
+
+    ex = FakeEx([OLD_STOP])
+    ex.degraded = True
+    with pytest.raises(OrdersUnavailable):
+        _kraken(ex).stops()
+    sim = ExchangeSim()
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    bot.step(c, now=now)
+    n = len(sim.created)
+    sim.degraded = True
+    for _ in range(4):
+        assert _cycle(bot, c, now) is True
+    assert len(sim.created) == n and sim.pos is not None and not bot.st.finished  # ni stops de más ni aborto
+
+
+def test_when_the_stop_cannot_be_verified_the_bot_does_not_write_blindly(tmp_path, no_sleep):
+    sim = ExchangeSim()
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    bot.step(c, now=now)
+    n = len(sim.created)
+    sim.fetch_open_orders = _boom
+    for _ in range(4):
+        assert _cycle(bot, c, now) is True
+    assert len(sim.created) == n and sim.pos is not None and not bot.st.finished
+
+
+def test_duplicate_stop_is_accepted_by_trigger_and_size_when_openorders_has_no_cliordid():
+    """KR-F3: sin cliOrdId en openorders, un reintento tras un timeout aplicado dejaba el bot congelado."""
+    mine = {"id": "s", "triggerPrice": 59000.0, "side": "sell", "amount": 0.01}  # sin clientOrderId
+    ex = FakeEx([OLD_STOP, mine], raise_duplicate=True)
+    _kraken(ex).set_stop(LONG, 59000.0, client_id=CID)
+    assert ("cancel", "old") in ex.log and ("cancel", "s") not in ex.log  # se limpia lo viejo, NO la orden emparejada
+    wrong = FakeEx([{**mine, "triggerPrice": 59500.0}], raise_duplicate=True)
+    with pytest.raises(OrderNotConfirmed):
+        _kraken(wrong).set_stop(LONG, 59000.0, client_id=CID)  # otro disparo: no es la misma orden
+    other_size = FakeEx([{**mine, "amount": 0.05}], raise_duplicate=True)
+    with pytest.raises(OrderNotConfirmed):
+        _kraken(other_size).set_stop(LONG, 59000.0, client_id=CID)  # otra cantidad: tampoco
+
+
+def test_stop_detection_ignores_zero_triggers_and_foreign_markets():
+    """KR-F4: stopPrice 0 contaba como stop y las órdenes de otros mercados que ccxt etiqueta como BTC también."""
+    orders = [
+        {"id": "tp0", "stopPrice": 0.0, "price": 70000.0, "side": "sell", "amount": 0.01},
+        {"id": "sol", "triggerPrice": 100.0, "side": "sell", "amount": 5.0, "info": {"symbol": "PF_SOLUSD"}},
+        {"id": "ok", "triggerPrice": 58000.0, "side": "sell", "amount": 0.01, "info": {"symbol": "PF_XBTUSD"}},
+    ]
+    ex = FakeEx(orders)
+    k = _kraken(ex)
+    assert [(s.trigger, s.qty, s.side) for s in k.stops()] == [(58000.0, 0.01, -1)]
+    k._cancel_kind("tp")
+    assert ("cancel", "tp0") in ex.log and (
+        "cancel",
+        "sol",
+    ) not in ex.log  # el TP con stopPrice 0 sí es TP; el ajeno no
+
+
+def test_stop_client_id_changes_with_price_and_size_and_is_stable_across_retries(tmp_path):
+    """Si el id no dependiera del precio o la cantidad, un stop movido o redimensionado se daría por 'duplicado'."""
+    ex = FakeEx([])
+    bot = _bot_with(_kraken(ex), tmp_path)
+
+    def cid(pos, stop):
+        ex.created.clear()
+        assert bot._place_stop(pos, stop)
+        return ex.created[-1][4]["clientOrderId"]
+
+    a, b = cid(Pos(1, 0.01, 60000.0), 59000.0), cid(Pos(1, 0.01, 60000.0), 59000.0)
+    moved, resized = cid(Pos(1, 0.01, 60000.0), 59010.0), cid(Pos(1, 0.02, 60000.0), 59000.0)
+    assert a == b and len({a, moved, resized}) == 3

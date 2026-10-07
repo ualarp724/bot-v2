@@ -39,6 +39,21 @@ class OrderNotConfirmed(RuntimeError):
     """Kraken no devolvió un id verificable (o rechazó la orden): cuenta como fallo de colocación."""
 
 
+class OrdersUnavailable(RuntimeError):
+    """La lista de órdenes abiertas no es fiable (respuesta degradada): NO equivale a 'no hay órdenes'."""
+
+
+@dataclass(frozen=True)
+class StopOrder:
+    trigger: float
+    qty: float | None  # None = cantidad desconocida
+    side: int  # +1 compra, -1 venta, 0 desconocido (un stop que protege un largo es una VENTA: side = -1)
+
+
+_LOT = 0.0001  # BTC
+_MARKET_ID = "PF_XBTUSD"
+
+
 def _finite(x) -> float | None:
     try:
         v = float(x)
@@ -54,8 +69,18 @@ def _is_duplicate(e: Exception) -> bool:
     return isinstance(e, ccxt.DuplicateOrderId)
 
 
+def _trigger(order: dict) -> float | None:
+    for k in ("triggerPrice", "stopPrice"):
+        v = _finite(order.get(k))
+        if v is not None and v != 0:
+            return v
+    return None
+
+
 def _is_stop(order: dict) -> bool:
-    return (order.get("triggerPrice") or order.get("stopPrice")) is not None
+    """Orden con precio de disparo finito y > 0 (un stopPrice 0 o inválido no es un stop)."""
+    t = _trigger(order)
+    return t is not None and t > 0
 
 
 def _order_id(order) -> str | None:
@@ -204,11 +229,39 @@ class KrakenPerp:
             raise
         return float(o.get("average") or o.get("price") or self.price())
 
-    def _has_open_order(self, client_id: str) -> bool:
-        return any(o.get("clientOrderId") == client_id for o in self.ex.fetch_open_orders(SYMBOL))
+    def _open_orders(self) -> list[dict]:
+        """Órdenes abiertas del perpetuo de BTC. Lanza OrdersUnavailable si la respuesta no trae la lista
+        `openOrders` (ccxt la convertiría en [] sin avisar y parecería que no hay ningún stop) y descarta las
+        órdenes de otros mercados que ccxt etiqueta como BTC cuando no conoce su símbolo."""
+        orders = self.ex.fetch_open_orders(SYMBOL)
+        raw = getattr(self.ex, "last_json_response", None)
+        if isinstance(raw, dict) and not isinstance(raw.get("openOrders"), list):
+            raise OrdersUnavailable("la respuesta de openorders no trae la lista 'openOrders'")
+        return [o for o in orders if str((o.get("info") or {}).get("symbol") or _MARKET_ID).upper() == _MARKET_ID]
+
+    def stops(self) -> list[StopOrder]:
+        """Stops vivos en el exchange con su cantidad y lado."""
+        out = []
+        for o in self._open_orders():
+            if _is_stop(o):
+                side = {"buy": 1, "sell": -1}.get(str(o.get("side")).lower(), 0)
+                out.append(StopOrder(_trigger(o), _finite(o.get("amount")), side))
+        return out
+
+    def _find_open_order(self, client_id: str, trigger: float | None = None, qty: float | None = None) -> dict | None:
+        """La orden abierta con ese clientOrderId. Si openorders no devuelve el cliOrdId, para los STOPS se acepta una
+        equivalente (mismo disparo y misma cantidad): evita quedarse congelado tras un timeout que sí se aplicó."""
+        for o in self._open_orders():
+            if o.get("clientOrderId") == client_id:
+                return o
+            amount = _finite(o.get("amount"))
+            same_qty = qty is None or amount is None or abs(amount - qty) <= _LOT
+            if trigger is not None and _is_stop(o) and same_qty and abs(_trigger(o) - trigger) < 0.5:
+                return o
+        return None
 
     def _cancel_kind(self, kind: str, keep_client_id: str | None = None):
-        for o in self.ex.fetch_open_orders(SYMBOL):
+        for o in self._open_orders():
             if keep_client_id and o.get("clientOrderId") == keep_client_id:
                 continue  # la orden que acabamos de colocar nosotros: nunca se cancela a sí misma
             if (kind == "stop" and _is_stop(o)) or (kind == "tp" and not _is_stop(o)):
@@ -229,10 +282,8 @@ class KrakenPerp:
 
     def stop_price(self) -> float | None:
         """Precio de disparo del stop vivo en el exchange, o None si no hay ninguno."""
-        stops = [o for o in self.ex.fetch_open_orders(SYMBOL) if _is_stop(o)]
-        if not stops:
-            return None
-        return float(stops[-1].get("triggerPrice") or stops[-1].get("stopPrice"))
+        stops = self.stops()
+        return stops[-1].trigger if stops else None
 
     def set_stop(self, pos: Pos, stop: float, client_id: str | None = None):
         """Crea el stop nuevo y lo confirma ANTES de cancelar los anteriores: si la creación falla, el
@@ -241,7 +292,7 @@ class KrakenPerp:
         'ya existe'; se da por colocado solo si esa orden está realmente abierta."""
         previous = [
             o["id"]
-            for o in self.ex.fetch_open_orders(SYMBOL)
+            for o in self._open_orders()
             if _is_stop(o) and not (client_id and o.get("clientOrderId") == client_id)
         ]
         params = {"stopLossPrice": round(stop), "triggerSignal": "mark", "reduceOnly": True}
@@ -253,10 +304,12 @@ class KrakenPerp:
         except Exception as e:
             if not (client_id and _is_duplicate(e)):
                 raise
-            if not self._has_open_order(client_id):
+            match = self._find_open_order(client_id, trigger=round(stop), qty=pos.qty)
+            if match is None:
                 raise OrderNotConfirmed(
                     f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él"
                 ) from e
+            previous = [oid for oid in previous if oid != match["id"]]  # la que ya está puesta no se cancela
             _log.warning(
                 "set_stop: el clientOrderId %s ya existe y está abierto: el intento anterior sí llegó", client_id
             )
@@ -279,17 +332,19 @@ class KrakenPerp:
         except Exception as e:
             if not (client_id and _is_duplicate(e)):
                 raise
-            if not self._has_open_order(client_id):
+            if self._find_open_order(client_id) is None:
                 raise OrderNotConfirmed(
                     f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él"
                 ) from e
             _log.warning("set_take_profit: el clientOrderId %s ya existe y está abierto", client_id)
 
     def close_all(self):
-        self.ex.cancel_all_orders(SYMBOL)
+        """Cierra la posición A MERCADO primero y solo después cancela las órdenes pendientes: si el cierre falla, el
+        stop sigue protegiendo (cancelar antes dejaba la posición desnuda mientras el cierre fallase)."""
         pos = self.position()
         if pos:
             self.market(-pos.side, pos.qty, reduce_only=True)
+        self.ex.cancel_all_orders(SYMBOL)
 
 
 class PaperPerp:
@@ -347,6 +402,11 @@ class PaperPerp:
 
     def stop_price(self) -> float | None:
         return self.stop
+
+    def stops(self) -> list[StopOrder]:
+        if self.stop is None or self.pos is None:
+            return []
+        return [StopOrder(self.stop, self.pos.qty, -self.pos.side)]
 
     def set_stop(self, pos: Pos, stop: float, client_id: str | None = None):
         self.stop = stop

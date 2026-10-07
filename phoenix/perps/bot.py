@@ -117,14 +117,21 @@ class Bot:
             capital = float("nan")
         self.log.info("FIN: %s. Capital final %.2f $", why, capital)
 
-    # --- invariante: posición abierta => stop vivo en el exchange ---
-    def _stop_alive(self) -> bool | None:
-        """True/False según el exchange; None si no se pudo consultar (un fallo de red no prueba que falte el stop)."""
+    # --- invariante: posición abierta => stop vivo en el exchange que cubra TODA la posición ---
+    def _stop_check(self, pos: Pos) -> tuple[str | None, list]:
+        """Estado real del stop en el exchange: 'full' (cubre la posición entera), 'partial' (cubre solo una parte),
+        'none' (no hay) o None si no se pudo consultar (un fallo de red no prueba que falte el stop)."""
         try:
-            return self.x.stop_price() is not None
+            stops = self.x.stops()
         except Exception as e:  # noqa: BLE001
             self.log.warning("No se pudo verificar el stop en el exchange: %s", e)
-            return None
+            return None, []
+        mine = [s for s in stops if s.side in (0, -pos.side)]  # un stop de salida es una orden del lado contrario
+        if not mine:
+            return "none", []
+        if any(s.qty is None for s in mine):
+            return "full", mine  # cantidad desconocida: no se puede afirmar que falte cobertura
+        return ("full" if sum(s.qty for s in mine) >= pos.qty - LOT / 2 else "partial"), mine
 
     def _intend_stop(self, stop: float):
         """Persiste el stop previsto ANTES de tocar el exchange: si el proceso muere entre el fill y set_stop,
@@ -153,13 +160,14 @@ class Bot:
             self.st.save(self.state_path)
             return True
         self.st.stop_failures += 1
-        alive = self._stop_alive()
-        if alive is True:  # no se pudo mover el stop, pero el anterior sigue vivo: protegida, se reintenta
+        state, _ = self._stop_check(pos)
+        if state == "full":  # no se pudo mover el stop, pero el anterior cubre la posición entera: protegida
+            self.st.stop_failures = 0  # el contador cuenta ciclos SIN stop verificado: no se acumula aquí
             self.log.error(
                 "No se pudo mover el stop a %.0f; sigue activo el anterior. Se reintenta en el próximo ciclo.", stop
             )
-        elif alive is False or self.st.stop_failures >= self.cfg.stop_unverified_cycles:
-            self.log.critical("No se pudo asegurar el stop a %.0f: cierre a mercado y aborto.", stop)
+        elif state in ("none", "partial") or self.st.stop_failures >= self.cfg.stop_unverified_cycles:
+            self.log.critical("No se pudo asegurar el stop a %.0f (%s): cierre a mercado y aborto.", stop, state)
             self._finish("ABORTADO: no se pudo asegurar el stop, posición cerrada a mercado")
             return False
         else:
@@ -171,22 +179,39 @@ class Bot:
         self.st.save(self.state_path)
         return False
 
-    def _reconcile_stop(self, pos: Pos | None, equity: float) -> bool:
-        """Se ejecuta CADA ciclo, antes de decidir nada, contra el estado REAL del exchange (no contra lo que
-        el bot cree haber enviado). False si el stop previsto aún no está sincronizado o el bot abortó."""
+    def _reconcile_stop(self, pos: Pos | None) -> bool:
+        """Se ejecuta CADA ciclo, antes de leer el capital ni decidir nada, contra el estado REAL del exchange (no
+        contra lo que el bot cree haber enviado). False si el stop previsto aún no está sincronizado o el bot abortó."""
         if pos is None:
             if self.st.stop is not None or not self.st.stop_synced:
-                self.log.info("Posición cerrada por stop u objetivo. Capital %.2f $", equity)
+                self.log.info("Posición cerrada por stop u objetivo.")
                 self.st.stop, self.st.stop_synced, self.st.stop_failures = None, True, 0
                 self.st.save(self.state_path)
             return True
-        alive = self._stop_alive()
-        if self.st.stop_synced and alive is not False:
+        state, mine = self._stop_check(pos)
+        if self.st.stop_synced and state in ("full", None):
+            if (
+                state == "full" and self.st.stop is None
+            ):  # posición con stop vivo pero sin estado: se ADOPTA, no se afloja
+                pick = max if pos.side == 1 else min
+                self.st.stop = pick(s.trigger for s in mine)
+                self.log.warning("Se adopta el stop %.0f que ya hay en el exchange.", self.st.stop)
+                self.st.save(self.state_path)
             return True  # sincronizado (o no verificable: no se actúa a ciegas)
-        if alive is False and self.st.stop_synced:
-            self.st.stop_gen += 1  # el stop desapareció: el id anterior ya existió, hace falta uno nuevo
-            self.log.error("La posición no tiene stop en el exchange: se repone.")
+        if self.st.stop_synced:
+            if state == "none":
+                self.st.stop_gen += 1  # el stop desapareció: el id anterior ya existió, hace falta uno nuevo
+                self.log.error("La posición no tiene stop en el exchange: se repone.")
+            else:  # 'partial': el id lleva la cantidad, así que ya es distinto
+                self.log.error("El stop del exchange cubre solo una parte de la posición: se repone completo.")
         stop = self.st.stop if self.st.stop is not None else pos.entry * (1 - pos.side * STOP_FALLBACK_PCT)
+        try:
+            price = self.x.price()
+        except Exception:  # noqa: BLE001 — sin precio no se puede validar; se sigue con la reposición
+            price = None
+        if price and not self._stop_ok(pos.side, stop, price):  # el stop pendiente ya está superado: es una SALIDA
+            self._exit_now(f"el stop pendiente {stop:.0f} ya está superado por el precio {price:.0f}")
+            return True
         return self._secure_stop(pos, stop)
 
     # --- un paso del bucle ---
@@ -195,6 +220,9 @@ class Bot:
         now = now or pd.Timestamp.now(tz="UTC")
         if self.st.finished:
             return False
+        pos = self.x.position()
+        if not self._reconcile_stop(pos):  # PRIMERO: un fallo al leer el capital no puede dejar la posición sin stop
+            return not self.st.finished  # stop pendiente de sincronizar (o bot abortado): no se opera esta vela
         equity = self.x.equity()
         if self.st.started is None:
             if equity > self.cfg.max_start_equity:
@@ -216,10 +244,6 @@ class Bot:
         if now >= pd.Timestamp(self.st.started) + pd.Timedelta(days=self.cfg.days):
             self._finish("fin del plazo")
             return False
-
-        pos = self.x.position()
-        if not self._reconcile_stop(pos, equity):
-            return not self.st.finished  # stop pendiente de sincronizar (o bot abortado): no se opera esta vela
 
         last = candles.index[-1]
         if self.st.last_candle == last.isoformat():
