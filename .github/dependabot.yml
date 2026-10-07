@@ -1,0 +1,23 @@
+# Mantiene al día los SHA de las acciones (fijados por commit en ci.yml) y las dependencias de Python.
+# Los PR de Dependabot pasan por el mismo CI (lint, pip-audit, gitleaks y tests) antes de poder fusionarse.
+# cooldown: no se adopta una versión hasta 7 días después de publicarse (defensa ante paquetes recién comprometidos).
+# Las actualizaciones de seguridad no esperan el cooldown.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5

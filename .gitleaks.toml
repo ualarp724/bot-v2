@@ -1,0 +1,13 @@
+title = "Phoenix: escaneo de secretos"
+
+[extend]
+useDefault = true  # reglas por defecto de gitleaks + la específica de abajo
+
+# Credenciales de Kraken Futures asignadas en .env, scripts o configuración. .env.example (valores vacíos) no coincide.
+[[rules]]
+id = "kraken-futures-credential"
+description = "Variable KRAKEN_[DEMO_]FUTURES_KEY / _SECRET con un valor asignado"
+regex = '''(?i)KRAKEN(?:_DEMO)?_FUTURES_(?:KEY|SECRET)[ \t]*[=:][ \t]*['"]?([A-Za-z0-9+/=_\-]{20,})'''
+secretGroup = 1
+entropy = 3.0
+keywords = ["kraken_futures", "kraken_demo_futures"]

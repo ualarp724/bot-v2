@@ -28,9 +28,27 @@ Python 3.11:
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-pytest
+pip install -r requirements-dev.txt   # ejecución + desarrollo; solo para ejecutar: requirements.txt
+pytest --cov=phoenix                  # recoge solo tests/ y falla si la cobertura baja de 65 %
+ruff check . && ruff format --check .
 ```
+
+## Calidad y CI
+
+`.github/workflows/ci.yml` ejecuta en cada push y pull request (y cada lunes, para pillar avisos nuevos):
+
+| Job | Qué comprueba |
+| --- | --- |
+| `lint` | `ruff check` y `ruff format --check` (configuración en `pyproject.toml`) |
+| `audit` | `pip-audit` sobre `requirements-dev.txt`, dependencias transitivas incluidas |
+| `secrets` | `gitleaks` sobre todo el historial; regla propia para claves `KRAKEN_*_KEY/SECRET` |
+| `test` | `pytest --cov=phoenix` en Python 3.11 y 3.13; `fail_under = 65` en `pyproject.toml` |
+
+- El workflow no usa secretos: tiene `contents: read`, acciones fijadas por SHA y Dependabot las mantiene al día.
+- `legacy/` y `research/` quedan fuera de ruff y de pytest. `legacy/` no se mantiene y `research/` son experimentos.
+- Excepción documentada de `pip-audit`: `CVE-2026-104874` (multidict 6.7.1). `ccxt` lo fija con `==` y la fuga
+  de memoria solo afecta a servidores; quitar la excepción de `ci.yml` cuando `ccxt` permita `multidict>=6.9.1`.
+- Si gitleaks marca un falso positivo, se añade su huella exacta a `.gitleaksignore` (con un comentario que lo explique).
 
 ## Datos en `data/raw/`
 

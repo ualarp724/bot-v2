@@ -1,0 +1,131 @@
+name: CI
+
+# Endurecimiento (github-actions-hardening):
+#  - Solo triggers sin privilegios (push, pull_request, schedule, workflow_dispatch). Nada de pull_request_target.
+#  - GITHUB_TOKEN de solo lectura a nivel de workflow; ningún job necesita más ni usa secretos.
+#  - Todas las acciones fijadas por SHA de 40 caracteres, con la versión en un comentario (Dependabot las actualiza).
+#  - persist-credentials: false en cada checkout (ningún paso posterior necesita el token en disco).
+#  - Ningún `${{ }}` con datos controlables por terceros dentro de `run:`; las versiones y checksums van por `env:`.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 5 * * 1" # lunes: vuelve a auditar dependencias nuevas y el historial aunque no haya commits
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHON_VERSION: "3.11" # versión declarada del proyecto (README)
+
+jobs:
+  lint:
+    name: Lint y formato (ruff)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Instalar ruff (versión fijada en requirements-dev.txt)
+        run: pip install "$(grep -E '^ruff==' requirements-dev.txt)"
+      - name: ruff check
+        run: ruff check --output-format=github .
+      - name: ruff format --check
+        run: ruff format --check .
+
+  audit:
+    name: Auditoría de dependencias (pip-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Instalar pip-audit (versión fijada en requirements-dev.txt)
+        run: pip install "$(grep -E '^pip-audit==' requirements-dev.txt)"
+      - name: Auditar requirements-dev.txt (incluye dependencias transitivas)
+        # EXCEPCIÓN DOCUMENTADA: CVE-2026-104874 (GHSA-54p9-h82j-f925) en multidict 6.7.1. Fuga de memoria en los
+        # operadores de unión/resta de ItemsView, explotable en SERVIDORES aio-libs que los aplican a cabeceras o
+        # query strings controladas por un atacante. Este bot es un cliente síncrono (requests vía ccxt) y no lo
+        # hace. ccxt fija multidict==6.7.1 (también la última, 4.5.85), así que no hay forma de actualizarlo
+        # todavía. Quitar esta excepción cuando ccxt permita multidict>=6.9.1.
+        run: pip-audit -r requirements-dev.txt --progress-spinner off --ignore-vuln CVE-2026-104874
+
+  secrets:
+    name: Escaneo de secretos (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (historial completo)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Instalar gitleaks (versión y SHA-256 fijados)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "${RUNNER_TEMP}/gitleaks.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/gitleaks.tar.gz" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/gitleaks.tar.gz" -C "${RUNNER_TEMP}" gitleaks
+      - name: Escanear todo el historial (claves de Kraken incluidas)
+        run: '"${RUNNER_TEMP}/gitleaks" git --config .gitleaks.toml --redact --no-banner --verbose .'
+
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+      - name: Instalar dependencias
+        run: pip install -r requirements-dev.txt
+      - name: pytest con cobertura (umbral en pyproject.toml, fail_under)
+        run: pytest --cov=phoenix --cov-report=term-missing

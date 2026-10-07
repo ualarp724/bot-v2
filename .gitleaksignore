@@ -1,0 +1,6 @@
+# Falsos positivos revisados a mano. Se ignoran por huella exacta (commit:fichero:regla:línea), no por carpeta.
+#
+# Ejemplo "❌ MAL - Credenciales en código" de una guía para agentes de Copilot (legacy/docs/copilot_agents/):
+# un valor de 19 caracteres sin relación con ningún exchange, en un bloque que enseña lo que NO hay que hacer.
+1e3ce0fc44165d1ab2d77405f5e7122a76ebdc6c:.github/agents/trading-agent.md.agent.md:generic-api-key:633
+1e3ce0fc44165d1ab2d77405f5e7122a76ebdc6c:.github/agents/copilot-instructions.md:generic-api-key:633
