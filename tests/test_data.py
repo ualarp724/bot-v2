@@ -1,8 +1,7 @@
 import pandas as pd
 import pytest
 
-from phoenix.data import (clean_bars, dev_data, holdout_data, read_mt5_csv,
-                          server_to_utc, validate_bars)
+from phoenix.data import clean_bars, dev_data, holdout_data, read_mt5_csv, server_to_utc, validate_bars
 from phoenix.settings import load_settings
 
 HEADER = "<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>\n"
@@ -60,9 +59,12 @@ def test_validate_detects_problems():
 def test_validate_daily_break_and_weekend_are_expected():
     # Verano (NY = UTC-4). Pausa diaria: última vela 20:45 UTC (termina 21:00 = 17:00 NY),
     # siguiente 22:00 UTC (18:00 NY). Fin de semana: viernes 20:45 UTC -> domingo 22:00 UTC.
-    times = (["2025-07-17 20:30", "2025-07-17 20:45"]
-             + list(pd.date_range("2025-07-17 22:00", "2025-07-18 20:45", freq="15min").strftime("%Y-%m-%d %H:%M"))
-             + ["2025-07-20 22:00"])
+    times = [
+        "2025-07-17 20:30",
+        "2025-07-17 20:45",
+        *pd.date_range("2025-07-17 22:00", "2025-07-18 20:45", freq="15min").strftime("%Y-%m-%d %H:%M"),
+        "2025-07-20 22:00",
+    ]
     df = _bars(times)
     rep = validate_bars(df, 15)
     assert len(rep.unexpected_gaps) == 0

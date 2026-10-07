@@ -1,7 +1,6 @@
 import pytest
 
-from phoenix.costs import (commission_usd, max_sl_distance_usd, position_size,
-                           slippage_usd, spread_usd)
+from phoenix.costs import commission_usd, max_sl_distance_usd, position_size, slippage_usd, spread_usd
 from phoenix.settings import load_settings
 
 S = load_settings()

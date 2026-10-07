@@ -113,7 +113,7 @@ def download_day(day: pd.Timestamp, workers: int = 8) -> tuple[int, int]:
     def one(row):
         try:
             return [{"slug": row.slug, **t} for t in trades_around_start(row.condition_id, row.start_ts)]
-        except Exception:
+        except Exception:  # noqa: BLE001 — se devuelve None y, si falla alguno, el día entero se reintenta
             return None
 
     with ThreadPoolExecutor(workers) as ex:

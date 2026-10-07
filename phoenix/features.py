@@ -70,4 +70,4 @@ def build_features(bars: pd.DataFrame) -> pd.DataFrame:
     f["dow"] = ny.dayofweek
     f = f.join(_htf_block(bars, "1h", "h1")).join(_htf_block(bars, "4h", "h4"))
     f["atr"] = a  # no es feature del modelo: lo usan las estrategias para el SL
-    return f[FEATURES + ["atr"]]
+    return f[[*FEATURES, "atr"]]

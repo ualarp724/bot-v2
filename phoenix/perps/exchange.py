@@ -186,7 +186,7 @@ class KrakenPerp:
             params["clientOrderId"] = client_id
         try:
             o = self.ex.create_order(SYMBOL, "market", "buy" if side == 1 else "sell", qty, None, params)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if client_id and _is_duplicate(e):
                 _log.warning("market: el clientOrderId %s ya existe, la orden ya se envió; no se repite", client_id)
                 return self.price()
@@ -236,7 +236,7 @@ class KrakenPerp:
         try:
             new = self.ex.create_order(SYMBOL, "market", "sell" if pos.side == 1 else "buy", pos.qty, None, params)
             _confirmed_id(new, "el stop")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if not (client_id and _is_duplicate(e)):
                 raise
             if not self._has_open_order(client_id):
@@ -256,7 +256,7 @@ class KrakenPerp:
         try:
             order = self.ex.create_order(SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price), params)
             _confirmed_id(order, "el take profit")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             if not (client_id and _is_duplicate(e)):
                 raise
             if not self._has_open_order(client_id):

@@ -6,9 +6,11 @@ from dataclasses import dataclass
 import lightgbm as lgb
 import pandas as pd
 
-LGBM_PARAMS = dict(n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=200,
-                   subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
-                   random_state=42, verbose=-1, n_jobs=4)
+LGBM_PARAMS = {
+    "n_estimators": 300, "learning_rate": 0.03, "num_leaves": 15, "min_child_samples": 200,
+    "subsample": 0.8, "subsample_freq": 1, "colsample_bytree": 0.8, "reg_lambda": 1.0,
+    "random_state": 42, "verbose": -1, "n_jobs": 4,
+}
 
 
 @dataclass(frozen=True)

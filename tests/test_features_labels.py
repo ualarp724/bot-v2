@@ -1,3 +1,5 @@
+import itertools
+
 import numpy as np
 import pandas as pd
 
@@ -49,7 +51,7 @@ def test_labels_match_backtest_engine():
 def test_windows_and_purge():
     ws = make_windows(pd.Timestamp("2021-11-15", tz="UTC"), pd.Timestamp("2025-08-01", tz="UTC"))
     assert ws[0].val_start == pd.Timestamp("2023-05-15", tz="UTC")
-    assert all(a.val_end <= b.val_start or a.val_end == b.val_start for a, b in zip(ws, ws[1:]))
+    assert all(a.val_end <= b.val_start or a.val_end == b.val_start for a, b in itertools.pairwise(ws))
     idx = pd.date_range("2021-11-15", "2023-06-01", freq="15min", tz="UTC")
     m = train_rows(idx, ws[0], purge_bars=16)
     assert idx[m].max() < ws[0].train_end - pd.Timedelta(minutes=15 * 15)

@@ -98,18 +98,24 @@ def run_backtest(bars: pd.DataFrame, orders: pd.DataFrame, settings: Settings,
         for k in range(e, last + 1):
             if side == 1:  # sale al bid
                 if k > e and o[k] <= sl:
-                    exit_px, reason = o[k] - slip, "sl_gap"; break
+                    exit_px, reason = o[k] - slip, "sl_gap"
+                    break
                 if lo[k] <= sl:
-                    exit_px, reason = sl - slip, "sl"; break
+                    exit_px, reason = sl - slip, "sl"
+                    break
                 if h[k] >= tp:
-                    exit_px, reason = tp, "tp"; break
+                    exit_px, reason = tp, "tp"
+                    break
             else:  # sale al ask = bid + spread
                 if k > e and o[k] + spr[k] >= sl:
-                    exit_px, reason = o[k] + spr[k] + slip, "sl_gap"; break
+                    exit_px, reason = o[k] + spr[k] + slip, "sl_gap"
+                    break
                 if h[k] + spr[k] >= sl:
-                    exit_px, reason = sl + slip, "sl"; break
+                    exit_px, reason = sl + slip, "sl"
+                    break
                 if lo[k] + spr[k] <= tp:
-                    exit_px, reason = tp, "tp"; break
+                    exit_px, reason = tp, "tp"
+                    break
             if next_gap[k] or k == last:
                 exit_px = (c[k] - slip) if side == 1 else (c[k] + spr[k] + slip)
                 reason = "break" if next_gap[k] and k != last else "time"

@@ -64,7 +64,7 @@ class State:
     finished: str | None = None
 
     @classmethod
-    def load(cls, path: Path) -> "State":
+    def load(cls, path: Path) -> State:
         return cls(**json.loads(path.read_text())) if path.exists() else cls()
 
     def save(self, path: Path):
@@ -328,7 +328,7 @@ def main():
                 x.on_price(float(public_client().fetch_ticker("BTC/USD:USD")["last"]))
             if not bot.step(candles):
                 break
-        except Exception as e:  # noqa: BLE001 — un fallo de red no debe tumbar el bot
+        except Exception as e:  # un fallo de red no debe tumbar el bot: se registra y se reintenta
             log.exception("Error en el bucle: %s", e)
         time.sleep(60)
 

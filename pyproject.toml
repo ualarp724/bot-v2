@@ -1,0 +1,47 @@
+# Configuración de herramientas (no es un paquete instalable: el bot se ejecuta con `python -m phoenix...`).
+
+[tool.pytest.ini_options]
+# Solo `tests/`: `legacy/` tiene scripts rotos que ni siquiera se pueden importar y no se mantiene.
+testpaths = ["tests"]
+norecursedirs = ["legacy", "research", "data", "logs", ".git", ".venv", "venv"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["phoenix"]
+
+[tool.coverage.report]
+# Trinquete: la cobertura actual es ~68 %. No se permite bajar de 65 %; súbelo cuando la cobertura suba.
+fail_under = 65
+show_missing = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+# Fuera del lint y del formato (también si se pasan a mano):
+#  - legacy/: no se mantiene (625 avisos y 3 errores de sintaxis).
+#  - research/: experimentos reproducibles que necesitan data/raw; no se reformatean ni se les aplican autofixes
+#    porque no hay tests que demuestren que el resultado de cada informe sigue idéntico.
+extend-exclude = ["legacy", "research"]
+force-exclude = true
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "BLE",      # `except Exception` solo con `# noqa: BLE001` justificado (hay varios en el bot a propósito)
+    "C4",       # comprensiones
+    "RUF",
+]
+ignore = [
+    "E501",     # lo gestiona `ruff format`; cadenas y comentarios largos se permiten
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# Costs es un dataclass frozen: usarlo como valor por defecto es seguro.
+extend-immutable-calls = ["phoenix.perps.sim.Costs"]
+
+[tool.ruff.format]
+quote-style = "double"

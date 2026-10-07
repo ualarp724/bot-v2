@@ -1,7 +1,7 @@
 """Comprobación anti-fuga: lo calculado en t no puede cambiar si cambia el futuro."""
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd

@@ -36,7 +36,9 @@ def test_incomplete_last_candle_is_not_used():
 
 def test_checker_passes_correct_mtf():
     bars = _random_bars()
-    fn = lambda b: higher_tf_closed(b, "1h")["close"]
+    def fn(b):
+        return higher_tf_closed(b, "1h")["close"]
+
     assert lookahead_violations(fn, bars, cut_points=[50, 101, 202, 303]) == []
 
 

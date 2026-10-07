@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -120,8 +120,8 @@ def run(model_name: str, minutes: float, stake: float, margin: float):
         k = k[~k.index.duplicated(keep="last")].sort_index()
         f = features_1m(k)
         x = f.loc[[pd.Timestamp(start_ts - 60, unit="s", tz="UTC")], FEATURES] if pd.Timestamp(start_ts - 60, unit="s", tz="UTC") in f.index else None
-        row = {k_: "" for k_ in FIELDS}
-        row.update(start_utc=datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(), slug=f"btc-updown-5m-{start_ts}")
+        row = dict.fromkeys(FIELDS, "")
+        row.update(start_utc=datetime.fromtimestamp(start_ts, tz=UTC).isoformat(), slug=f"btc-updown-5m-{start_ts}")
         if info is None or x is None or x.isna().any(axis=1).iloc[0]:
             print(f"{row['start_utc']}: sin mercado o sin datos")
             _append(row)
