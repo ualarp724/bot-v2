@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -17,6 +19,12 @@ import pandas as pd
 
 SYMBOL = "BTC/USD:USD"
 ROOT = Path(__file__).resolve().parents[2]
+_log = logging.getLogger("perps")
+
+
+class EquityUnavailable(RuntimeError):
+    """El exchange no devolvió un capital utilizable. Nunca se sustituye por 0.0: un cero falso haría que
+    el bot cerrara la posición real por 'capital por debajo del mínimo'."""
 
 
 @dataclass
@@ -24,6 +32,10 @@ class Pos:
     side: int      # +1 largo, -1 corto
     qty: float     # BTC
     entry: float
+
+
+def _is_stop(order: dict) -> bool:
+    return (order.get("triggerPrice") or order.get("stopPrice")) is not None
 
 
 def _load_env():
@@ -84,13 +96,21 @@ class KrakenPerp:
         return float(self.ex.fetch_ticker(SYMBOL)["last"])
 
     def equity(self) -> float:
-        """Valor de la cuenta de margen (flex) en USD."""
+        """Valor de la cuenta de margen (flex) en USD. Lanza EquityUnavailable si la respuesta no trae un
+        valor numérico, finito y no negativo; no se improvisa con otros campos ni se devuelve 0.0."""
         bal = self.ex.fetch_balance()
-        flex = (bal.get("info", {}).get("accounts", {}) or {}).get("flex", {})
+        flex = ((bal.get("info") or {}).get("accounts") or {}).get("flex") or {}
         for k in ("portfolioValue", "balanceValue", "marginEquity"):
-            if flex.get(k) is not None:
-                return float(flex[k])
-        return float(bal["total"].get("USD", 0.0))
+            if flex.get(k) is None:
+                continue
+            try:
+                value = float(flex[k])
+            except (TypeError, ValueError):
+                raise EquityUnavailable(f"flex.{k} no es numérico: {flex[k]!r}") from None
+            if not math.isfinite(value) or value < 0:
+                raise EquityUnavailable(f"flex.{k} no es válido: {value!r}")
+            return value
+        raise EquityUnavailable("la respuesta de Kraken no trae flex.portfolioValue/balanceValue/marginEquity")
 
     def position(self) -> Pos | None:
         for p in self.ex.fetch_positions([SYMBOL]):
@@ -110,14 +130,29 @@ class KrakenPerp:
 
     def _cancel_kind(self, kind: str):
         for o in self.ex.fetch_open_orders(SYMBOL):
-            is_stop = (o.get("triggerPrice") or o.get("stopPrice")) is not None
-            if (kind == "stop" and is_stop) or (kind == "tp" and not is_stop):
+            if (kind == "stop" and _is_stop(o)) or (kind == "tp" and not _is_stop(o)):
                 self.ex.cancel_order(o["id"], SYMBOL)
 
+    def stop_price(self) -> float | None:
+        """Precio de disparo del stop vivo en el exchange, o None si no hay ninguno."""
+        stops = [o for o in self.ex.fetch_open_orders(SYMBOL) if _is_stop(o)]
+        if not stops:
+            return None
+        return float(stops[-1].get("triggerPrice") or stops[-1].get("stopPrice"))
+
     def set_stop(self, pos: Pos, stop: float):
-        self._cancel_kind("stop")
-        self.ex.create_order(SYMBOL, "market", "sell" if pos.side == 1 else "buy", pos.qty, None,
-                             {"stopLossPrice": round(stop), "triggerSignal": "mark"})
+        """Crea el stop nuevo y lo confirma ANTES de cancelar los anteriores: si la creación falla, el
+        stop vigente sigue protegiendo la posición (antes se cancelaba primero y un fallo la dejaba sin stop)."""
+        previous = [o["id"] for o in self.ex.fetch_open_orders(SYMBOL) if _is_stop(o)]
+        new = self.ex.create_order(SYMBOL, "market", "sell" if pos.side == 1 else "buy", pos.qty, None,
+                                   {"stopLossPrice": round(stop), "triggerSignal": "mark"})
+        if not (new or {}).get("id"):
+            raise RuntimeError("Kraken no confirmó el stop (respuesta sin id)")
+        for oid in previous:
+            try:
+                self.ex.cancel_order(oid, SYMBOL)
+            except Exception as e:  # noqa: BLE001 — el stop nuevo ya protege; el sobrante se limpia en el próximo set_stop
+                _log.warning("No se pudo cancelar el stop anterior %s: %s", oid, e)
 
     def set_take_profit(self, pos: Pos, price: float):
         self._cancel_kind("tp")
@@ -173,6 +208,9 @@ class PaperPerp:
                 self.stop = self.tp = None
         self.fills.append((side, qty, px, reduce_only))
         return px
+
+    def stop_price(self) -> float | None:
+        return self.stop
 
     def set_stop(self, pos: Pos, stop: float):
         self.stop = stop

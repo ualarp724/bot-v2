@@ -40,6 +40,12 @@ class Config:
     max_leverage: float = 9.0  # Kraken permite 10x; se deja margen para poder piramidar sin rechazos
     min_equity: float = 5.0
     max_start_equity: float = 150.0  # protección: no arrancar si la cuenta tiene más de lo previsto
+    stop_retries: int = 3  # intentos de colocar el stop en un mismo ciclo antes de dar la operación por insegura
+    stop_retry_delay_s: float = 2.0
+    stop_unverified_cycles: int = 3  # ciclos seguidos sin poder colocar NI verificar el stop antes de cerrar
+
+
+STOP_FALLBACK_PCT = 0.04  # stop de emergencia para una posición abierta de la que no se conoce el stop
 
 
 @dataclass
@@ -47,7 +53,9 @@ class State:
     started: str | None = None
     start_equity: float | None = None
     last_candle: str | None = None
-    stop: float | None = None
+    stop: float | None = None  # stop PREVISTO: se persiste antes de operar (puede no estar aún en el exchange)
+    stop_synced: bool = True  # False = hay un stop previsto que todavía no está confirmado en el exchange
+    stop_failures: int = 0  # ciclos seguidos en los que no se pudo asegurar el stop
     memory: dict = field(default_factory=dict)  # precio de la última compra para piramidar
     finished: str | None = None
 
@@ -80,7 +88,76 @@ class Bot:
         self.x.close_all()
         self.st.finished = f"{pd.Timestamp.now(tz='UTC').isoformat()} {why}"
         self.st.save(self.state_path)
-        self.log.info("FIN: %s. Capital final %.2f $", why, self.x.equity())
+        try:
+            capital = self.x.equity()
+        except Exception:  # noqa: BLE001 — el bot ya está cerrado y guardado; no se pierde el log por esto
+            capital = float("nan")
+        self.log.info("FIN: %s. Capital final %.2f $", why, capital)
+
+    # --- invariante: posición abierta => stop vivo en el exchange ---
+    def _stop_alive(self) -> bool | None:
+        """True/False según el exchange; None si no se pudo consultar (un fallo de red no prueba que falte el stop)."""
+        try:
+            return self.x.stop_price() is not None
+        except Exception as e:  # noqa: BLE001
+            self.log.warning("No se pudo verificar el stop en el exchange: %s", e)
+            return None
+
+    def _intend_stop(self, stop: float):
+        """Persiste el stop previsto ANTES de tocar el exchange: si el proceso muere entre el fill y set_stop,
+        al reiniciar se sabe qué stop falta y se repone."""
+        self.st.stop, self.st.stop_synced = stop, False
+        self.st.save(self.state_path)
+
+    def _place_stop(self, pos: Pos, stop: float) -> bool:
+        for i in range(1, self.cfg.stop_retries + 1):
+            try:
+                self.x.set_stop(pos, stop)
+                return True
+            except Exception as e:  # noqa: BLE001
+                self.log.warning("set_stop a %.0f falló (%d/%d): %s", stop, i, self.cfg.stop_retries, e)
+                if i < self.cfg.stop_retries and self.cfg.stop_retry_delay_s > 0:
+                    time.sleep(self.cfg.stop_retry_delay_s)
+        return False
+
+    def _secure_stop(self, pos: Pos, stop: float) -> bool:
+        """Coloca el stop con reintentos. True si queda confirmado. Si no se consigue y la posición se queda
+        sin protección (el exchange confirma que no hay stop, o no se puede ni verificar durante varios ciclos),
+        FAIL-SAFE: cierre a mercado y el bot se detiene."""
+        if self._place_stop(pos, stop):
+            self.st.stop, self.st.stop_synced, self.st.stop_failures = stop, True, 0
+            self.st.save(self.state_path)
+            return True
+        self.st.stop_failures += 1
+        alive = self._stop_alive()
+        if alive is True:  # no se pudo mover el stop, pero el anterior sigue vivo: protegida, se reintenta
+            self.log.error("No se pudo mover el stop a %.0f; sigue activo el anterior. Se reintenta en el próximo ciclo.", stop)
+        elif alive is False or self.st.stop_failures >= self.cfg.stop_unverified_cycles:
+            self.log.critical("No se pudo asegurar el stop a %.0f: cierre a mercado y aborto.", stop)
+            self._finish("ABORTADO: no se pudo asegurar el stop, posición cerrada a mercado")
+            return False
+        else:
+            self.log.error("No se pudo colocar NI verificar el stop (%d/%d ciclos).",
+                           self.st.stop_failures, self.cfg.stop_unverified_cycles)
+        self.st.save(self.state_path)
+        return False
+
+    def _reconcile_stop(self, pos: Pos | None, equity: float) -> bool:
+        """Se ejecuta CADA ciclo, antes de decidir nada, contra el estado REAL del exchange (no contra lo que
+        el bot cree haber enviado). False si el stop previsto aún no está sincronizado o el bot abortó."""
+        if pos is None:
+            if self.st.stop is not None or not self.st.stop_synced:
+                self.log.info("Posición cerrada por stop u objetivo. Capital %.2f $", equity)
+                self.st.stop, self.st.stop_synced, self.st.stop_failures = None, True, 0
+                self.st.save(self.state_path)
+            return True
+        alive = self._stop_alive()
+        if self.st.stop_synced and alive is not False:
+            return True  # sincronizado (o no verificable: no se actúa a ciegas)
+        if alive is False and self.st.stop_synced:
+            self.log.error("La posición no tiene stop en el exchange: se repone.")
+        stop = self.st.stop if self.st.stop is not None else pos.entry * (1 - pos.side * STOP_FALLBACK_PCT)
+        return self._secure_stop(pos, stop)
 
     # --- un paso del bucle ---
     def step(self, candles: pd.DataFrame, now: pd.Timestamp | None = None) -> bool:
@@ -108,31 +185,32 @@ class Bot:
             self._finish("fin del plazo")
             return False
 
+        pos = self.x.position()
+        if not self._reconcile_stop(pos, equity):
+            return not self.st.finished  # stop pendiente de sincronizar (o bot abortado): no se opera esta vela
+
         last = candles.index[-1]
         if self.st.last_candle == last.isoformat():
-            return True  # nada nuevo: las órdenes en el exchange hacen el resto
+            return True  # nada nuevo: el stop ya se ha comprobado arriba
         self.st.last_candle = last.isoformat()
 
         b4 = load_4h(candles)
         row = b4.iloc[-1].to_dict()
-        pos = self.x.position()
-        if pos is None and self.st.stop is not None:
-            self.log.info("Posición cerrada por stop u objetivo. Capital %.2f $", equity)
-            self.st.stop = None
         view = None if pos is None else Pos(pos.side, pos.qty, pos.entry)
         if view is not None:
-            view.stop = self.st.stop if self.st.stop is not None else pos.entry * (1 - pos.side * 0.04)
+            view.stop = self.st.stop if self.st.stop is not None else pos.entry * (1 - pos.side * STOP_FALLBACK_PCT)
         plan: Plan | None = self.strategy({"i": len(b4) - 1, "row": row, "pos": view, "equity": equity})
         price = self.x.price() or row["close"]
         if plan is not None:
             self._execute(plan, pos, equity, price)
         self.st.save(self.state_path)
-        return True
+        return not self.st.finished
 
     def _execute(self, plan: Plan, pos: Pos | None, equity: float, price: float):
         if pos is not None and plan.side != pos.side:
             self.x.close_all()
             pos = None
+            self.st.stop, self.st.stop_synced = None, True  # sin posición no hay stop que proteger
         if plan.side == 0:
             return
         if pos is None:
@@ -140,20 +218,24 @@ class Bot:
             if qty < LOT:
                 self.log.info("Señal %s pero el tamaño es menor que el mínimo", plan.side)
                 return
+            self._intend_stop(plan.stop)  # a disco ANTES del fill
             fill = self.x.market(plan.side, qty)
             pos = self.x.position() or Pos(plan.side, qty, fill)
             self.log.info("ABRE %s %.4f BTC a %.0f, stop %.0f (%.1fx)", "LARGO" if plan.side == 1 else "CORTO",
                           qty, fill, plan.stop, qty * fill / equity)
-        elif plan.leverage > 0:  # piramidar
-            add = self._qty(equity, plan.leverage, price) - pos.qty
-            if add >= LOT:
-                self.x.market(pos.side, add)
-                pos = self.x.position() or Pos(pos.side, pos.qty + add, pos.entry)
-                self.log.info("PIRAMIDA +%.4f BTC a %.0f (total %.4f)", add, price, pos.qty)
-        self.st.stop = plan.stop
-        self.x.set_stop(pos, plan.stop)
-        self.x.set_take_profit(pos, self._tp_price(pos, self.x.equity(), price))
-        self.log.info("Stop en %.0f, objetivo en %.0f", plan.stop, self._tp_price(pos, self.x.equity(), price))
+        else:
+            self._intend_stop(plan.stop)  # trailing y/o piramidar: ambos mueven el stop
+            if plan.leverage > 0:  # piramidar
+                add = self._qty(equity, plan.leverage, price) - pos.qty
+                if add >= LOT:
+                    self.x.market(pos.side, add)
+                    pos = self.x.position() or Pos(pos.side, pos.qty + add, pos.entry)
+                    self.log.info("PIRAMIDA +%.4f BTC a %.0f (total %.4f)", add, price, pos.qty)
+        if not self._secure_stop(pos, plan.stop):
+            return  # sin stop confirmado no se toca el objetivo: o sigue el anterior, o se cerró (fail-safe)
+        tp = self._tp_price(pos, self.x.equity(), price)
+        self.x.set_take_profit(pos, tp)
+        self.log.info("Stop en %.0f, objetivo en %.0f", plan.stop, tp)
 
 
 def main():
