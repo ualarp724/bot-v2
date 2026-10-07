@@ -97,6 +97,21 @@ Scripts: `research/05_descargar_btc5m.py` (descarga), `06_backtest_btc5m.py` (ba
 está en `data/raw/polymarket_btc5m_resumen.csv.gz`, así que el backtest se puede repetir sin
 volver a descargar las operaciones. Desde España la API de Polymarket está bloqueada por la DGOJ.
 
+## Estudio intradía (5m/15m) frente a 4h
+
+`phoenix/intraday/` + `research/10_intradia.py`: backtest fuera de muestra (walk-forward mensual) con los costes de Kraken
+Futures (taker 0,05 %, maker 0,02 %, deslizamiento ≥ 0,02 %), una posición como máximo, cierre obligatorio a las 23:45 UTC
+y parada del día con -2 %. Compara la ruptura de 4h con la ruptura intradía (parámetros fijos y walk-forward) y un LightGBM,
+con las mismas reglas de riesgo (0,5 % por operación). Necesita velas de 1 minuto de Binance (públicas):
+
+```bash
+python research/10_intradia.py --download                          # descarga + informe en research/10_intradia.md
+python research/10_intradia.py --synthetic --out /tmp/prueba.md    # prueba de la tubería con un paseo aleatorio (NO es BTC)
+```
+
+El motor se valida con 40+ tests (cuentas a mano, ausencia de fugas del futuro con controles positivos y neutralidad: sin
+ventaja y sin costes el bruto es ≈ 0).
+
 ## Bot de alto riesgo: perpetuo de BTC en Kraken (`phoenix/perps/`)
 
 Objetivo que pidió Arturo: intentar pasar de 100 € a 500 € en un mes, aceptando perderlos.
