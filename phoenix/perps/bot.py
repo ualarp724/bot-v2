@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +44,8 @@ class Config:
     stop_retries: int = 3  # intentos de colocar el stop en un mismo ciclo antes de dar la operación por insegura
     stop_retry_delay_s: float = 2.0
     stop_unverified_cycles: int = 3  # ciclos seguidos sin poder colocar NI verificar el stop antes de cerrar
+    margin_buffer: float = 0.05  # holgura sobre el margen inicial necesario al piramidar (comisiones, movimiento)
+    cid_namespace: str = "phoenix-perps"  # prefijo de los clientOrderId deterministas
 
 
 STOP_FALLBACK_PCT = 0.04  # stop de emergencia para una posición abierta de la que no se conoce el stop
@@ -56,6 +59,7 @@ class State:
     stop: float | None = None  # stop PREVISTO: se persiste antes de operar (puede no estar aún en el exchange)
     stop_synced: bool = True  # False = hay un stop previsto que todavía no está confirmado en el exchange
     stop_failures: int = 0  # ciclos seguidos en los que no se pudo asegurar el stop
+    stop_gen: int = 0  # sube cada vez que el stop desaparece del exchange: un id nuevo, no un falso "duplicado"
     memory: dict = field(default_factory=dict)  # precio de la última compra para piramidar
     finished: str | None = None
 
@@ -81,8 +85,24 @@ class Bot:
     def _target(self) -> float:
         return self.st.start_equity * self.cfg.target_multiple
 
-    def _tp_price(self, pos: Pos, equity: float, price: float) -> float:
-        return price + pos.side * (self._target() - equity) / pos.qty
+    def _tp_price(self, pos: Pos, equity: float, price: float) -> float | None:
+        """Precio al que el capital llegaría al objetivo; None si no es representable (negativo, no finito o del
+        lado equivocado del precio: p. ej. un corto pequeño cuyo objetivo caería por debajo de cero)."""
+        tp = price + pos.side * (self._target() - equity) / pos.qty
+        if not math.isfinite(tp) or tp <= 0 or pos.side * (tp - price) <= 0:
+            return None
+        return tp
+
+    def _cid(self, kind: str, *parts) -> str:
+        """clientOrderId DETERMINISTA (UUID v5): la misma orden lógica produce siempre el mismo id, así que un
+        reintento tras un timeout no puede duplicarla; otro proceso con el mismo estado calcula el mismo id."""
+        key = "|".join([self.cfg.cid_namespace, str(getattr(self.x, "mode", "paper")), kind, *map(str, parts)])
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+    @staticmethod
+    def _stop_ok(side: int, stop: float, ref: float) -> bool:
+        """El stop es un número finito y positivo y está del lado de las pérdidas respecto al precio de referencia."""
+        return math.isfinite(stop) and stop > 0 and (stop < ref if side == 1 else stop > ref)
 
     def _finish(self, why: str):
         self.x.close_all()
@@ -110,9 +130,10 @@ class Bot:
         self.st.save(self.state_path)
 
     def _place_stop(self, pos: Pos, stop: float) -> bool:
+        cid = self._cid("stop", self.st.stop_gen, pos.side, f"{pos.qty:.4f}", round(stop))  # igual en cada reintento
         for i in range(1, self.cfg.stop_retries + 1):
             try:
-                self.x.set_stop(pos, stop)
+                self.x.set_stop(pos, stop, client_id=cid)
                 return True
             except Exception as e:  # noqa: BLE001
                 self.log.warning("set_stop a %.0f falló (%d/%d): %s", stop, i, self.cfg.stop_retries, e)
@@ -155,6 +176,7 @@ class Bot:
         if self.st.stop_synced and alive is not False:
             return True  # sincronizado (o no verificable: no se actúa a ciegas)
         if alive is False and self.st.stop_synced:
+            self.st.stop_gen += 1  # el stop desapareció: el id anterior ya existió, hace falta uno nuevo
             self.log.error("La posición no tiene stop en el exchange: se repone.")
         stop = self.st.stop if self.st.stop is not None else pos.entry * (1 - pos.side * STOP_FALLBACK_PCT)
         return self._secure_stop(pos, stop)
@@ -206,6 +228,31 @@ class Bot:
         self.st.save(self.state_path)
         return not self.st.finished
 
+    def _exit_now(self, why: str):
+        """Salida por la estrategia: cierre a mercado (reduce-only) y el bot sigue operando."""
+        self.log.warning("SALIDA: %s. Cierre a mercado.", why)
+        self.x.close_all()
+        self.st.stop, self.st.stop_synced, self.st.stop_failures = None, True, 0
+
+    def _cap_pyramid_by_margin(self, add: float, price: float) -> float:
+        """Recorta (o anula) el tamaño a añadir según el margen disponible; sin dato, no se piramida."""
+        if add < LOT:
+            return add
+        try:
+            avail = self.x.available_margin()
+        except Exception as e:  # noqa: BLE001
+            self.log.warning("No se pudo leer el margen disponible: %s", e)
+            avail = None
+        if avail is None:
+            self.log.warning("Margen disponible desconocido: no se piramida.")
+            return 0.0
+        factor = 1 + self.cfg.margin_buffer
+        if add * price / self.cfg.max_leverage * factor <= avail:
+            return add
+        capped = math.floor(avail * self.cfg.max_leverage / factor / price / LOT) * LOT
+        self.log.warning("Margen disponible %.2f $ insuficiente para +%.4f BTC: se añade %.4f BTC.", avail, add, max(capped, 0.0))
+        return capped if capped >= LOT else 0.0
+
     def _execute(self, plan: Plan, pos: Pos | None, equity: float, price: float):
         if pos is not None and plan.side != pos.side:
             self.x.close_all()
@@ -213,30 +260,44 @@ class Bot:
             self.st.stop, self.st.stop_synced = None, True  # sin posición no hay stop que proteger
         if plan.side == 0:
             return
+        candle = self.st.last_candle
         if pos is None:
+            if not self._stop_ok(plan.side, plan.stop, price):
+                self.log.warning("Señal %s descartada: stop %s inválido o del lado equivocado del precio %.0f.",
+                                 plan.side, plan.stop, price)
+                return
             qty = self._qty(equity, plan.leverage, price)
             if qty < LOT:
                 self.log.info("Señal %s pero el tamaño es menor que el mínimo", plan.side)
                 return
             self._intend_stop(plan.stop)  # a disco ANTES del fill
-            fill = self.x.market(plan.side, qty)
+            fill = self.x.market(plan.side, qty, client_id=self._cid("entry", candle, plan.side))
             pos = self.x.position() or Pos(plan.side, qty, fill)
             self.log.info("ABRE %s %.4f BTC a %.0f, stop %.0f (%.1fx)", "LARGO" if plan.side == 1 else "CORTO",
                           qty, fill, plan.stop, qty * fill / equity)
         else:
+            if not (math.isfinite(plan.stop) and plan.stop > 0):
+                self.log.warning("Plan con stop inválido (%s): se ignora y se mantiene el stop actual.", plan.stop)
+                return
+            if not self._stop_ok(pos.side, plan.stop, price):  # el stop previsto ya está del otro lado: es una SALIDA
+                self._exit_now(f"el stop previsto {plan.stop:.0f} ya está superado por el precio {price:.0f}")
+                return
             self._intend_stop(plan.stop)  # trailing y/o piramidar: ambos mueven el stop
             if plan.leverage > 0:  # piramidar
-                add = self._qty(equity, plan.leverage, price) - pos.qty
+                add = self._cap_pyramid_by_margin(self._qty(equity, plan.leverage, price) - pos.qty, price)
                 if add >= LOT:
-                    self.x.market(pos.side, add)
+                    self.x.market(pos.side, add, client_id=self._cid("add", candle, pos.side, f"{pos.qty:.4f}"))
                     pos = self.x.position() or Pos(pos.side, pos.qty + add, pos.entry)
                     self.log.info("PIRAMIDA +%.4f BTC a %.0f (total %.4f)", add, price, pos.qty)
         if not self._secure_stop(pos, plan.stop):
             return  # sin stop confirmado no se toca el objetivo: o sigue el anterior, o se cerró (fail-safe)
         tp = self._tp_price(pos, self.x.equity(), price)
-        self.x.set_take_profit(pos, tp)
+        if tp is None:
+            self.log.warning("Objetivo no representable para este tamaño: solo se vigila por software.")
+            self.log.info("Stop en %.0f", plan.stop)
+            return
+        self.x.set_take_profit(pos, tp, client_id=self._cid("tp", candle, pos.side, f"{pos.qty:.4f}", round(tp)))
         self.log.info("Stop en %.0f, objetivo en %.0f", plan.stop, tp)
-
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

@@ -1,5 +1,6 @@
 import json
 
+import ccxt
 import pandas as pd
 import pytest
 
@@ -119,12 +120,12 @@ class FlakyStop(PaperPerp):
         super().__init__(equity)
         self.fail_times, self.set_stop_calls = fail_times, 0
 
-    def set_stop(self, pos, stop):
+    def set_stop(self, pos, stop, client_id=None):
         self.set_stop_calls += 1
         if self.fail_times > 0:
             self.fail_times -= 1
             raise ConnectionError("red caída al colocar el stop")
-        super().set_stop(pos, stop)
+        super().set_stop(pos, stop, client_id)
 
 
 class _Crash(BaseException):
@@ -134,10 +135,10 @@ class _Crash(BaseException):
 class CrashOnSetStop(PaperPerp):
     crash = True
 
-    def set_stop(self, pos, stop):
+    def set_stop(self, pos, stop, client_id=None):
         if self.crash:
             raise _Crash()
-        super().set_stop(pos, stop)
+        super().set_stop(pos, stop, client_id)
 
 
 @pytest.fixture
@@ -306,12 +307,13 @@ def test_bot_neither_trades_nor_finishes_when_equity_is_unavailable(tmp_path):
 # --- KrakenPerp contra un ccxt simulado (sin red) ---
 class FakeEx:
     def __init__(self, orders=None, fail_create=False, create_returns_id=True, fail_cancel=False, balance=None,
-                 create_response=None):
+                 create_response=None, raise_duplicate=False):
         self.orders = list(orders or [])
         self.fail_create, self.create_returns_id, self.fail_cancel = fail_create, create_returns_id, fail_cancel
         self.balance, self.log = balance, []
         self.created = []  # (tipo, lado, cantidad, precio, params) de CADA create_order recibido
         self.create_response = create_response  # respuesta fija de create_order (p. ej. un rechazo sin id)
+        self.raise_duplicate = raise_duplicate  # create_order responde clientOrderIdAlreadyExist
 
     def fetch_open_orders(self, symbol):
         return list(self.orders)
@@ -324,11 +326,14 @@ class FakeEx:
         self.log.append(("create", params.get("stopLossPrice")))
         if self.fail_create:
             raise ConnectionError("timeout creando el stop")
+        if self.raise_duplicate:
+            raise ccxt.DuplicateOrderId("krakenfutures: createOrder failed due to clientOrderIdAlreadyExist")
         if self.create_response is not None:
             return self.create_response
         if not self.create_returns_id:
             return {}
-        o = {"id": f"new{len(self.log)}", "triggerPrice": params.get("stopLossPrice")}
+        o = {"id": f"new{len(self.log)}", "triggerPrice": params.get("stopLossPrice"),
+             "clientOrderId": params.get("clientOrderId")}
         if "stopLossPrice" in params:
             self.orders.append(o)
         return o
@@ -531,9 +536,11 @@ def test_unconfirmed_take_profit_raises():
 class ExchangeSim(FakeEx):
     """ccxt simulado con posición y órdenes: lo justo para que KrakenPerp trabaje dentro de Bot."""
 
-    def __init__(self, equity=114.0, last=87000.0, stop_response=None):
+    def __init__(self, equity=114.0, last=87000.0, stop_response=None, timeout_after_effect=0):
         super().__init__(balance={"info": {"accounts": {"flex": {"portfolioValue": str(equity)}}}, "total": {}})
         self.last, self.pos, self.stop_response = last, None, stop_response
+        self.seen_cids, self.timeout_after_effect = set(), timeout_after_effect  # N stops se aplican y luego "timeout"
+        self.accepted_stops = 0  # stops que el exchange ACEPTÓ en total (aunque luego se cancelen)
 
     def fetch_ticker(self, symbol):
         return {"last": self.last}
@@ -550,14 +557,23 @@ class ExchangeSim(FakeEx):
     def create_order(self, symbol, typ, side, amount, price, params):
         self.created.append((typ, side, amount, price, dict(params)))
         n = len(self.created)
+        cid = params.get("clientOrderId")
+        if cid is not None:
+            if cid in self.seen_cids:
+                raise ccxt.DuplicateOrderId("krakenfutures: createOrder failed due to clientOrderIdAlreadyExist")
+            self.seen_cids.add(cid)
         if "stopLossPrice" in params:
             if self.stop_response is not None:
                 return self.stop_response
-            o = {"id": f"stop{n}", "status": "open", "triggerPrice": params["stopLossPrice"]}
+            o = {"id": f"stop{n}", "status": "open", "triggerPrice": params["stopLossPrice"], "clientOrderId": cid}
             self.orders.append(o)
+            self.accepted_stops += 1
+            if self.timeout_after_effect > 0:
+                self.timeout_after_effect -= 1
+                raise ConnectionError("timeout: la orden se aplicó pero la respuesta no llegó")
             return o
         if typ == "limit":
-            o = {"id": f"tp{n}", "status": "open", "price": price}
+            o = {"id": f"tp{n}", "status": "open", "price": price, "clientOrderId": cid}
             self.orders.append(o)
             return o
         if params.get("reduceOnly"):
@@ -595,3 +611,204 @@ def test_end_to_end_confirmed_stop_keeps_position_and_reconcile_is_idempotent(tm
     assert exits and all(x[4].get("reduceOnly") is True for x in exits)
     n = len(sim.created)
     assert bot.step(c, now=now) is True and len(sim.created) == n  # mismo estado: no se duplica ninguna orden
+
+
+# =====================================================================================================
+# Fase 2: clientOrderId determinista, idempotencia y validaciones de cordura antes de enviar
+# =====================================================================================================
+CID = "11111111-2222-5333-8444-555555555555"
+
+
+def _cid(n):
+    return CID[:-1] + str(n)
+
+
+def test_client_order_id_is_forwarded_on_every_order_type():
+    ex = FakeEx([])
+    k = _kraken(ex)
+    k.set_stop(LONG, 59000.0, client_id=_cid(1))
+    k.set_take_profit(LONG, 70000.0, client_id=_cid(2))
+    k.market(1, 0.01, client_id=_cid(3))
+    assert [c[4].get("clientOrderId") for c in ex.created] == [_cid(1), _cid(2), _cid(3)]
+
+
+def test_orders_without_client_id_do_not_send_the_param():
+    ex = FakeEx([])
+    _kraken(ex).set_stop(LONG, 59000.0)
+    assert "clientOrderId" not in ex.created[0][4]
+
+
+def test_client_order_id_reaches_the_real_ccxt_request_as_cliOrdId():
+    ex = FakeEx([])
+    _kraken(ex).set_stop(LONG, 59000.0, client_id=CID)
+    c = ccxt.krakenfutures()
+    c.set_markets([_FAKE_MARKET])
+    req = c.create_order_request("BTC/USD:USD", "market", "sell", 0.01, None, ex.created[0][4])
+    assert req["cliOrdId"] == CID and req["reduceOnly"] is True
+
+
+def test_duplicate_stop_id_is_success_when_that_stop_is_already_open_and_older_ones_are_cleaned():
+    mine = {"id": "mine", "triggerPrice": 59000.0, "clientOrderId": CID}
+    ex = FakeEx([OLD_STOP, mine], raise_duplicate=True)
+    _kraken(ex).set_stop(LONG, 59000.0, client_id=CID)  # el primer intento sí llegó: no es un error
+    assert ("cancel", "old") in ex.log and ("cancel", "mine") not in ex.log
+
+
+def test_duplicate_stop_id_without_that_order_open_is_a_placement_failure():
+    ex = FakeEx([OLD_STOP], raise_duplicate=True)
+    with pytest.raises(OrderNotConfirmed):
+        _kraken(ex).set_stop(LONG, 59000.0, client_id=CID)
+    assert ("cancel", "old") not in ex.log
+
+
+def test_duplicate_take_profit_id_is_success_and_never_cancels_itself():
+    tp = {"id": "tp1", "price": 70000.0, "clientOrderId": CID}
+    ex = FakeEx([tp], raise_duplicate=True)
+    _kraken(ex).set_take_profit(LONG, 70000.0, client_id=CID)
+    assert ("cancel", "tp1") not in ex.log
+
+
+def test_duplicate_market_order_is_neither_resent_nor_fatal():
+    ex = FakeEx([], raise_duplicate=True)
+    assert _kraken(ex).market(1, 0.01, client_id=CID) == pytest.approx(60000.0)  # precio actual: la posición manda
+    assert len(ex.created) == 1
+
+
+def _flex_balance(**flex):
+    return {"info": {"accounts": {"flex": flex}}, "total": {}}
+
+
+def test_available_margin_reads_flex_and_is_none_when_unknown():
+    assert _kraken(FakeEx(balance=_flex_balance(availableMargin="37.5"))).available_margin() == pytest.approx(37.5)
+    assert _kraken(FakeEx(balance=_flex_balance(availableMargin=-4.0))).available_margin() == 0.0  # sin margen
+    for bal in (_flex_balance(), _flex_balance(availableMargin=None), _flex_balance(availableMargin="abc"),
+                _flex_balance(availableMargin=float("nan")), None, {}):
+        assert _kraken(FakeEx(balance=bal)).available_margin() is None
+
+
+def test_client_order_ids_are_deterministic_unique_and_valid_uuids(tmp_path):
+    import uuid
+    bot = _bot_with(PaperPerp(114.0), tmp_path)
+    c0, c1 = "2026-01-01T00:00:00+00:00", "2026-01-01T04:00:00+00:00"
+    a = bot._cid("entry", c0, 1)
+    assert a == bot._cid("entry", c0, 1)  # determinista
+    assert str(uuid.UUID(a)) == a  # UUID válido
+    assert len({a, bot._cid("entry", c0, -1), bot._cid("add", c0, 1), bot._cid("entry", c1, 1)}) == 4
+    assert _bot_with(PaperPerp(114.0), tmp_path)._cid("entry", c0, 1) == a  # otro proceso: mismos ids
+
+
+def test_stop_retry_after_a_timeout_that_did_apply_does_not_duplicate_the_stop(tmp_path, no_sleep):
+    """El stop se coloca pero la respuesta no llega (timeout). El reintento lleva el MISMO clientOrderId: Kraken
+    contesta 'ya existe' y el bot lo da por colocado, sin segundo stop (que no es reduceOnly-seguro de duplicar)."""
+    sim = ExchangeSim(timeout_after_effect=1)
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    assert bot.step(c, now=now) is True
+    stops = [o for o in sim.orders if o.get("triggerPrice") is not None]
+    assert len(stops) == 1 and sim.pos is not None and not bot.st.finished
+    assert len([x for x in sim.created if "stopLossPrice" in x[4]]) == 2  # el original y un único reintento
+    assert sim.accepted_stops == 1, "el exchange aceptó más de un stop: hubo una ventana con stops duplicados"
+    assert len({x[4]["clientOrderId"] for x in sim.created if "stopLossPrice" in x[4]}) == 1  # mismo id en los dos intentos
+    assert bot.st.stop_synced and bot.st.stop_failures == 0
+
+
+def test_stop_cancelled_externally_is_replaced_with_a_new_id_not_a_false_duplicate(tmp_path, no_sleep):
+    sim = ExchangeSim()
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    bot.step(c, now=now)
+    first = next(o for o in sim.orders if o.get("triggerPrice") is not None)
+    sim.orders = [o for o in sim.orders if o.get("triggerPrice") is None]  # alguien cancela el stop a mano
+    assert bot.step(c, now=now) is True
+    stops = [o for o in sim.orders if o.get("triggerPrice") is not None]
+    assert len(stops) == 1 and stops[0]["clientOrderId"] != first["clientOrderId"]
+    assert sim.pos is not None and not bot.st.finished  # el id repetido NO dispara el fail-safe
+
+
+# --- validaciones de cordura antes del envío ---
+def _plan_bot(tmp_path, plan, x=None):
+    x = x or PaperPerp(114.0)
+    bot = _bot_with(x, tmp_path)
+    bot.strategy = lambda ctx: plan(x) if callable(plan) else plan  # `plan` puede depender del precio actual
+    c = _trend_candles()
+    x.last = float(c["close"].iloc[-1])
+    return bot, x, c, c.index[-1] + pd.Timedelta(hours=4)
+
+
+@pytest.mark.parametrize("side,offset", [(1, 100.0), (1, 0.0), (-1, -100.0), (-1, 0.0)])
+def test_new_entry_with_the_stop_on_the_wrong_side_is_not_sent(tmp_path, side, offset):
+    bot, x, c, now = _plan_bot(tmp_path, lambda x: Plan(side, x.last + offset, 5.0))
+    assert bot.step(c, now=now) is True
+    assert x.pos is None and not x.fills and bot.st.stop is None
+
+
+@pytest.mark.parametrize("stop", [float("nan"), float("inf"), -5.0, 0.0])
+def test_new_entry_with_non_finite_or_non_positive_stop_is_not_sent(tmp_path, stop):
+    bot, x, c, now = _plan_bot(tmp_path, Plan(1, stop, 5.0))
+    assert bot.step(c, now=now) is True
+    assert x.pos is None and not x.fills
+
+
+def test_crossed_stop_on_an_open_long_closes_at_market_instead_of_sending_an_invalid_stop(tmp_path, no_sleep):
+    """Si el canal de salida ya está roto, el stop previsto queda por encima del precio: es una SALIDA."""
+    x = FlakyStop(114.0, fail_times=0)
+    bot = _bot_with(x, tmp_path)
+    c = _trend_candles()
+    x.last = float(c["close"].iloc[-1])
+    now = c.index[-1] + pd.Timedelta(hours=4)
+    assert bot.step(c, now=now) and x.pos is not None
+    calls = x.set_stop_calls
+    c2 = _next_candle(c)
+    x.last = float(c2["close"].iloc[-1])
+    bot.strategy = lambda ctx: Plan(1, x.last + 50.0, 0.0)
+    assert bot.step(c2, now=now) is True
+    assert x.pos is None and not bot.st.finished and bot.st.stop is None
+    assert x.set_stop_calls == calls and x.fills[-1][3] is True
+
+
+def test_take_profit_price_is_none_when_it_cannot_be_represented(tmp_path):
+    bot = _bot_with(PaperPerp(114.0), tmp_path)
+    bot.st.start_equity = 114.0  # objetivo = 570 $
+    assert bot._tp_price(Pos(1, 0.01, 60000.0), 114.0, 60000.0) == pytest.approx(105600.0)
+    assert bot._tp_price(Pos(-1, 0.01, 60000.0), 114.0, 60000.0) == pytest.approx(14400.0)
+    assert bot._tp_price(Pos(-1, 0.005, 60000.0), 50.0, 60000.0) is None  # saldría negativo: -44000
+    assert bot._tp_price(Pos(1, 0.01, 60000.0), 600.0, 60000.0) is None  # ya por encima del objetivo: TP bajo el precio
+
+
+def test_short_with_an_unrepresentable_take_profit_gets_its_stop_but_no_tp(tmp_path):
+    bot, x, c, now = _plan_bot(tmp_path, Plan(-1, 87500.0, 0.5))  # tamaño pequeño: el TP saldría negativo
+    assert bot.step(c, now=now) is True
+    assert x.pos is not None and x.pos.side == -1
+    assert x.stop is not None and x.tp is None
+
+
+class Margin(PaperPerp):
+    def __init__(self, equity, avail):
+        super().__init__(equity)
+        self.avail = avail
+
+    def available_margin(self):
+        return self.avail
+
+
+def _pyramid_run(tmp_path, avail):
+    x = Margin(114.0, avail)
+    bot = _bot_with(x, tmp_path)
+    c = _trend_candles()
+    x.last = float(c["close"].iloc[-1])
+    now = c.index[-1] + pd.Timedelta(hours=4)
+    bot.step(c, now=now)
+    qty0, stop0 = x.pos.qty, x.stop
+    c2 = _next_candle(c, step=600.0)  # sube más de 1 ATR: toca piramidar y subir el stop
+    x.last = float(c2["close"].iloc[-1])
+    bot.step(c2, now=now)
+    return x, qty0, stop0
+
+
+def test_pyramiding_is_limited_by_the_available_margin(tmp_path):
+    full, q0, s0 = _pyramid_run(tmp_path / "a", avail=1e9)
+    partial, _, _ = _pyramid_run(tmp_path / "b", avail=3.0)
+    zero, _, _ = _pyramid_run(tmp_path / "c", avail=0.0)
+    unknown, _, _ = _pyramid_run(tmp_path / "d", avail=None)
+    assert full.pos.qty > partial.pos.qty > q0  # con margen justo se añade menos
+    assert zero.pos.qty == pytest.approx(q0) and unknown.pos.qty == pytest.approx(q0)  # sin margen o sin dato: no se piramida
+    for x in (full, partial, zero, unknown):
+        assert x.stop > s0  # pero el stop sí se sube siempre

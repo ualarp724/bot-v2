@@ -46,6 +46,12 @@ def _finite(x) -> float | None:
     return v if math.isfinite(v) else None
 
 
+def _is_duplicate(e: Exception) -> bool:
+    """Kraken contestó clientOrderIdAlreadyExist (ccxt lo mapea a DuplicateOrderId)."""
+    import ccxt
+    return isinstance(e, ccxt.DuplicateOrderId)
+
+
 def _is_stop(order: dict) -> bool:
     return (order.get("triggerPrice") or order.get("stopPrice")) is not None
 
@@ -172,15 +178,43 @@ class KrakenPerp:
     def set_leverage(self, lev: float):
         self.ex.set_leverage(int(lev), SYMBOL)
 
-    def market(self, side: int, qty: float, reduce_only: bool = False) -> float:
-        o = self.ex.create_order(SYMBOL, "market", "buy" if side == 1 else "sell", qty, None,
-                                 {"reduceOnly": True} if reduce_only else {})
+    def market(self, side: int, qty: float, reduce_only: bool = False, client_id: str | None = None) -> float:
+        """Orden a mercado. Con `client_id` es idempotente: si Kraken contesta 'ya existe' la orden ya se envió
+        (p. ej. un timeout que sí se aplicó) y NO se reenvía; la posición del exchange es la fuente de verdad."""
+        params = {"reduceOnly": True} if reduce_only else {}
+        if client_id:
+            params["clientOrderId"] = client_id
+        try:
+            o = self.ex.create_order(SYMBOL, "market", "buy" if side == 1 else "sell", qty, None, params)
+        except Exception as e:  # noqa: BLE001
+            if client_id and _is_duplicate(e):
+                _log.warning("market: el clientOrderId %s ya existe, la orden ya se envió; no se repite", client_id)
+                return self.price()
+            raise
         return float(o.get("average") or o.get("price") or self.price())
 
-    def _cancel_kind(self, kind: str):
+    def _has_open_order(self, client_id: str) -> bool:
+        return any(o.get("clientOrderId") == client_id for o in self.ex.fetch_open_orders(SYMBOL))
+
+    def _cancel_kind(self, kind: str, keep_client_id: str | None = None):
         for o in self.ex.fetch_open_orders(SYMBOL):
+            if keep_client_id and o.get("clientOrderId") == keep_client_id:
+                continue  # la orden que acabamos de colocar nosotros: nunca se cancela a sí misma
             if (kind == "stop" and _is_stop(o)) or (kind == "tp" and not _is_stop(o)):
                 self.ex.cancel_order(o["id"], SYMBOL)
+
+    def available_margin(self) -> float | None:
+        """Margen disponible (flex.availableMargin) en USD; None si no se puede conocer. Negativo => 0.0."""
+        try:
+            bal = self.ex.fetch_balance()
+        except Exception as e:  # noqa: BLE001
+            _log.warning("No se pudo leer el margen disponible: %s", e)
+            return None
+        if not isinstance(bal, dict):
+            return None
+        flex = ((bal.get("info") or {}).get("accounts") or {}).get("flex") or {}
+        value = _finite(flex.get("availableMargin"))
+        return None if value is None else max(value, 0.0)
 
     def stop_price(self) -> float | None:
         """Precio de disparo del stop vivo en el exchange, o None si no hay ninguno."""
@@ -189,24 +223,45 @@ class KrakenPerp:
             return None
         return float(stops[-1].get("triggerPrice") or stops[-1].get("stopPrice"))
 
-    def set_stop(self, pos: Pos, stop: float):
+    def set_stop(self, pos: Pos, stop: float, client_id: str | None = None):
         """Crea el stop nuevo y lo confirma ANTES de cancelar los anteriores: si la creación falla, el
-        stop vigente sigue protegiendo la posición (antes se cancelaba primero y un fallo la dejaba sin stop)."""
-        previous = [o["id"] for o in self.ex.fetch_open_orders(SYMBOL) if _is_stop(o)]
-        new = self.ex.create_order(SYMBOL, "market", "sell" if pos.side == 1 else "buy", pos.qty, None,
-                                   {"stopLossPrice": round(stop), "triggerSignal": "mark", "reduceOnly": True})
-        _confirmed_id(new, "el stop")
+        stop vigente sigue protegiendo la posición (antes se cancelaba primero y un fallo la dejaba sin stop).
+        Con `client_id` es idempotente: si el intento anterior sí llegó (timeout tras aplicarse), Kraken contesta
+        'ya existe'; se da por colocado solo si esa orden está realmente abierta."""
+        previous = [o["id"] for o in self.ex.fetch_open_orders(SYMBOL)
+                    if _is_stop(o) and not (client_id and o.get("clientOrderId") == client_id)]
+        params = {"stopLossPrice": round(stop), "triggerSignal": "mark", "reduceOnly": True}
+        if client_id:
+            params["clientOrderId"] = client_id
+        try:
+            new = self.ex.create_order(SYMBOL, "market", "sell" if pos.side == 1 else "buy", pos.qty, None, params)
+            _confirmed_id(new, "el stop")
+        except Exception as e:  # noqa: BLE001
+            if not (client_id and _is_duplicate(e)):
+                raise
+            if not self._has_open_order(client_id):
+                raise OrderNotConfirmed(f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él") from e
+            _log.warning("set_stop: el clientOrderId %s ya existe y está abierto: el intento anterior sí llegó", client_id)
         for oid in previous:
             try:
                 self.ex.cancel_order(oid, SYMBOL)
             except Exception as e:  # noqa: BLE001 — el stop nuevo ya protege; el sobrante se limpia en el próximo set_stop
                 _log.warning("No se pudo cancelar el stop anterior %s: %s", oid, e)
 
-    def set_take_profit(self, pos: Pos, price: float):
-        self._cancel_kind("tp")
-        order = self.ex.create_order(SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price),
-                                     {"reduceOnly": True})
-        _confirmed_id(order, "el take profit")
+    def set_take_profit(self, pos: Pos, price: float, client_id: str | None = None):
+        self._cancel_kind("tp", keep_client_id=client_id)
+        params = {"reduceOnly": True}
+        if client_id:
+            params["clientOrderId"] = client_id
+        try:
+            order = self.ex.create_order(SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price), params)
+            _confirmed_id(order, "el take profit")
+        except Exception as e:  # noqa: BLE001
+            if not (client_id and _is_duplicate(e)):
+                raise
+            if not self._has_open_order(client_id):
+                raise OrderNotConfirmed(f"clientOrderId {client_id} duplicado pero no hay ninguna orden abierta con él") from e
+            _log.warning("set_take_profit: el clientOrderId %s ya existe y está abierto", client_id)
 
     def close_all(self):
         self.ex.cancel_all_orders(SYMBOL)
@@ -224,6 +279,7 @@ class PaperPerp:
         self.stop = self.tp = None
         self.last = None
         self.fills: list[tuple] = []
+        self.client_ids: set[str] = set()
 
     def candles(self, n: int = 1200) -> pd.DataFrame:
         return candles_4h(self.client, n)
@@ -240,7 +296,16 @@ class PaperPerp:
     def set_leverage(self, lev: float):
         pass
 
-    def market(self, side: int, qty: float, reduce_only: bool = False) -> float:
+    def available_margin(self) -> float:
+        """Margen libre con el máximo del exchange (10x): equity - nocional/10."""
+        used = self.pos.qty * self.last / 10.0 if self.pos else 0.0
+        return max(self.equity() - used, 0.0)
+
+    def market(self, side: int, qty: float, reduce_only: bool = False, client_id: str | None = None) -> float:
+        if client_id is not None:
+            if client_id in self.client_ids:  # como Kraken: mismo clientOrderId = misma orden, no se repite
+                return self.last
+            self.client_ids.add(client_id)
         px = self.last
         self.cash -= qty * px * self.taker
         if self.pos is None:
@@ -261,10 +326,10 @@ class PaperPerp:
     def stop_price(self) -> float | None:
         return self.stop
 
-    def set_stop(self, pos: Pos, stop: float):
+    def set_stop(self, pos: Pos, stop: float, client_id: str | None = None):
         self.stop = stop
 
-    def set_take_profit(self, pos: Pos, price: float):
+    def set_take_profit(self, pos: Pos, price: float, client_id: str | None = None):
         self.tp = price
 
     def close_all(self):
