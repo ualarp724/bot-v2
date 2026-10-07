@@ -34,8 +34,47 @@ class Pos:
     entry: float
 
 
+class OrderNotConfirmed(RuntimeError):
+    """Kraken no devolvió un id verificable (o rechazó la orden): cuenta como fallo de colocación."""
+
+
+def _finite(x) -> float | None:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
 def _is_stop(order: dict) -> bool:
     return (order.get("triggerPrice") or order.get("stopPrice")) is not None
+
+
+def _order_id(order) -> str | None:
+    """Id verificable de una orden recién creada. ccxt lo mapea desde sendStatus.order_id, pero un rechazo con
+    `orderEvents` vacío vuelve SIN id: se prueban las estructuras equivalentes y, si no hay, devuelve None."""
+    if not isinstance(order, dict):
+        return None
+    if order.get("id"):
+        return str(order["id"])
+    info = order.get("info") or {}
+    for k in ("order_id", "orderId"):
+        if info.get(k):
+            return str(info[k])
+    for ev in info.get("orderEvents") or []:
+        for key in ("order", "new", "orderPriorExecution"):
+            inner = ev.get(key) or {}
+            if inner.get("orderId"):
+                return str(inner["orderId"])
+    return None
+
+
+def _confirmed_id(order, what: str) -> str:
+    oid = _order_id(order)
+    status = order.get("status") if isinstance(order, dict) else None
+    if oid is None or status in ("rejected", "canceled", "expired"):
+        raise OrderNotConfirmed(f"Kraken no confirmó {what}: id={oid!r}, status={status!r}")
+    return oid
 
 
 def _load_env():
@@ -96,21 +135,31 @@ class KrakenPerp:
         return float(self.ex.fetch_ticker(SYMBOL)["last"])
 
     def equity(self) -> float:
-        """Valor de la cuenta de margen (flex) en USD. Lanza EquityUnavailable si la respuesta no trae un
-        valor numérico, finito y no negativo; no se improvisa con otros campos ni se devuelve 0.0."""
+        """Valor de la cuenta de margen (flex) en USD.
+
+        1) flex.portfolioValue / balanceValue / marginEquity (valor real de la cartera).
+        2) Si no hay ninguno válido: total['USD'] con un WARNING. En cuentas flex ccxt rellena ese campo con la
+           CANTIDAD de colateral en USD, que no incluye el PnL no realizado, así que es una aproximación; solo se
+           acepta si es finito y > 0 (un 0 podría ser colateral en otra divisa, no una cuenta vacía).
+        Si ninguna fuente da un valor computable lanza EquityUnavailable: nunca se devuelve 0.0 en silencio."""
         bal = self.ex.fetch_balance()
+        if not isinstance(bal, dict):
+            raise EquityUnavailable(f"fetch_balance no devolvió un balance utilizable: {bal!r}")
         flex = ((bal.get("info") or {}).get("accounts") or {}).get("flex") or {}
         for k in ("portfolioValue", "balanceValue", "marginEquity"):
             if flex.get(k) is None:
                 continue
-            try:
-                value = float(flex[k])
-            except (TypeError, ValueError):
-                raise EquityUnavailable(f"flex.{k} no es numérico: {flex[k]!r}") from None
-            if not math.isfinite(value) or value < 0:
-                raise EquityUnavailable(f"flex.{k} no es válido: {value!r}")
-            return value
-        raise EquityUnavailable("la respuesta de Kraken no trae flex.portfolioValue/balanceValue/marginEquity")
+            value = _finite(flex[k])
+            if value is not None and value >= 0:
+                return value
+            _log.warning("equity: flex.%s no es un valor válido (%r); se ignora", k, flex[k])
+        usd = _finite((bal.get("total") or {}).get("USD"))
+        if usd is not None and usd > 0:
+            _log.warning("equity: sin flex.portfolioValue; se usa total['USD']=%.2f (cantidad de colateral USD, "
+                         "no incluye el PnL no realizado)", usd)
+            return usd
+        raise EquityUnavailable("la respuesta de Kraken no trae un capital computable "
+                                "(flex.portfolioValue/balanceValue/marginEquity ni total['USD'])")
 
     def position(self) -> Pos | None:
         for p in self.ex.fetch_positions([SYMBOL]):
@@ -145,9 +194,8 @@ class KrakenPerp:
         stop vigente sigue protegiendo la posición (antes se cancelaba primero y un fallo la dejaba sin stop)."""
         previous = [o["id"] for o in self.ex.fetch_open_orders(SYMBOL) if _is_stop(o)]
         new = self.ex.create_order(SYMBOL, "market", "sell" if pos.side == 1 else "buy", pos.qty, None,
-                                   {"stopLossPrice": round(stop), "triggerSignal": "mark"})
-        if not (new or {}).get("id"):
-            raise RuntimeError("Kraken no confirmó el stop (respuesta sin id)")
+                                   {"stopLossPrice": round(stop), "triggerSignal": "mark", "reduceOnly": True})
+        _confirmed_id(new, "el stop")
         for oid in previous:
             try:
                 self.ex.cancel_order(oid, SYMBOL)
@@ -156,8 +204,9 @@ class KrakenPerp:
 
     def set_take_profit(self, pos: Pos, price: float):
         self._cancel_kind("tp")
-        self.ex.create_order(SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price),
-                             {"reduceOnly": True})
+        order = self.ex.create_order(SYMBOL, "limit", "sell" if pos.side == 1 else "buy", pos.qty, round(price),
+                                     {"reduceOnly": True})
+        _confirmed_id(order, "el take profit")
 
     def close_all(self):
         self.ex.cancel_all_orders(SYMBOL)

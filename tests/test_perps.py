@@ -55,7 +55,12 @@ import logging  # noqa: E402
 import numpy as np  # noqa: E402
 
 from phoenix.perps.bot import Bot, Config  # noqa: E402
-from phoenix.perps.exchange import KrakenPerp, PaperPerp, Pos  # noqa: E402
+from phoenix.perps.exchange import (  # noqa: E402
+    KrakenPerp,
+    OrderNotConfirmed,
+    PaperPerp,
+    Pos,
+)
 
 
 def _trend_candles(n=1300, breakout_last=True):
@@ -300,22 +305,32 @@ def test_bot_neither_trades_nor_finishes_when_equity_is_unavailable(tmp_path):
 
 # --- KrakenPerp contra un ccxt simulado (sin red) ---
 class FakeEx:
-    def __init__(self, orders=None, fail_create=False, create_returns_id=True, fail_cancel=False, balance=None):
+    def __init__(self, orders=None, fail_create=False, create_returns_id=True, fail_cancel=False, balance=None,
+                 create_response=None):
         self.orders = list(orders or [])
         self.fail_create, self.create_returns_id, self.fail_cancel = fail_create, create_returns_id, fail_cancel
         self.balance, self.log = balance, []
+        self.created = []  # (tipo, lado, cantidad, precio, params) de CADA create_order recibido
+        self.create_response = create_response  # respuesta fija de create_order (p. ej. un rechazo sin id)
 
     def fetch_open_orders(self, symbol):
         return list(self.orders)
 
+    def fetch_ticker(self, symbol):
+        return {"last": 60000.0}
+
     def create_order(self, symbol, typ, side, amount, price, params):
+        self.created.append((typ, side, amount, price, dict(params)))
         self.log.append(("create", params.get("stopLossPrice")))
         if self.fail_create:
             raise ConnectionError("timeout creando el stop")
+        if self.create_response is not None:
+            return self.create_response
         if not self.create_returns_id:
             return {}
-        o = {"id": f"new{len(self.log)}", "triggerPrice": params["stopLossPrice"]}
-        self.orders.append(o)
+        o = {"id": f"new{len(self.log)}", "triggerPrice": params.get("stopLossPrice")}
+        if "stopLossPrice" in params:
+            self.orders.append(o)
         return o
 
     def cancel_order(self, oid, symbol):
@@ -355,7 +370,7 @@ def test_set_stop_keeps_previous_stop_when_creation_fails():
 
 def test_set_stop_does_not_cancel_previous_if_new_order_is_not_confirmed():
     ex = FakeEx([OLD_STOP], create_returns_id=False)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(OrderNotConfirmed):
         _kraken(ex).set_stop(LONG, 59000.0)
     assert ("cancel", "old") not in ex.log
 
@@ -379,7 +394,6 @@ def test_equity_reads_flex_portfolio_value():
 
 @pytest.mark.parametrize("bal", [
     {"info": {"accounts": {"flex": {}}}, "total": {}},                    # flex sin ningún valor
-    {"info": {"accounts": {}}, "total": {"USD": 50.0}},                   # sin flex: no se improvisa con otro dato
     {"info": {}, "total": {}},                                            # respuesta vacía
     {"info": {"accounts": {"flex": {"portfolioValue": "abc"}}}, "total": {}},   # no numérico
     {"info": {"accounts": {"flex": {"portfolioValue": float("nan")}}}, "total": {}},
@@ -389,3 +403,195 @@ def test_equity_raises_instead_of_returning_zero_silently(bal):
     from phoenix.perps.exchange import EquityUnavailable
     with pytest.raises(EquityUnavailable):
         _kraken(FakeEx(balance=bal)).equity()
+
+
+def test_equity_falls_back_to_total_usd_with_a_warning_when_flex_is_missing(caplog):
+    """Cuentas demo / payload alternativo: hay un valor real computable, se usa pero avisando."""
+    bal = {"info": {"accounts": {}}, "total": {"USD": 50.0}}
+    with caplog.at_level(logging.WARNING, logger="perps"):
+        assert _kraken(FakeEx(balance=bal)).equity() == pytest.approx(50.0)
+    assert any("total['USD']" in r.getMessage() and "no incluye" in r.getMessage() for r in caplog.records)
+
+
+def test_equity_flex_value_takes_precedence_and_does_not_warn(caplog):
+    bal = {"info": {"accounts": {"flex": {"portfolioValue": "114.5"}}}, "total": {"USD": 99.0}}
+    with caplog.at_level(logging.WARNING, logger="perps"):
+        assert _kraken(FakeEx(balance=bal)).equity() == pytest.approx(114.5)
+    assert not caplog.records
+
+
+def test_equity_invalid_flex_value_falls_back_to_total_usd_with_warnings(caplog):
+    bal = {"info": {"accounts": {"flex": {"portfolioValue": "abc"}}}, "total": {"USD": 75.0}}
+    with caplog.at_level(logging.WARNING, logger="perps"):
+        assert _kraken(FakeEx(balance=bal)).equity() == pytest.approx(75.0)
+    assert len(caplog.records) == 2  # el valor inválido y el uso del fallback
+
+
+@pytest.mark.parametrize("bal", [
+    None,                                                       # balance nulo
+    {},                                                         # balance vacío
+    {"info": {"accounts": {}}, "total": {"USD": 0.0}},          # 0.0 no es un valor computable (¿colateral en otra divisa?)
+    {"info": {"accounts": {}}, "total": {"USD": None}},
+    {"info": {"accounts": {}}, "total": {"USD": float("nan")}},
+    {"info": {"accounts": {}}, "total": {"USD": -3.0}},
+    {"info": {"accounts": {}}, "total": {"USD": "n/a"}},
+])
+def test_equity_still_raises_when_nothing_computable(bal):
+    from phoenix.perps.exchange import EquityUnavailable
+    with pytest.raises(EquityUnavailable):
+        _kraken(FakeEx(balance=bal)).equity()
+
+
+# --- reduceOnly obligatorio en stops y órdenes condicionales de salida ---
+_FAKE_MARKET = {
+    "id": "PF_XBTUSD", "symbol": "BTC/USD:USD", "base": "BTC", "quote": "USD", "settle": "USD", "baseId": "BTC",
+    "quoteId": "USD", "settleId": "usd", "type": "swap", "spot": False, "margin": False, "swap": True, "future": False,
+    "option": False, "contract": True, "linear": True, "inverse": False, "active": True, "contractSize": 1,
+    "precision": {"amount": 0.0001, "price": 1.0}, "limits": {"amount": {"min": 0.0001}, "price": {}, "cost": {}}, "info": {},
+}
+
+
+def test_every_stop_and_take_profit_order_is_sent_reduce_only():
+    ex = FakeEx([])
+    k = _kraken(ex)
+    k.set_stop(LONG, 59000.0)
+    k.set_take_profit(LONG, 70000.0)
+    k.set_stop(Pos(-1, 0.01, 60000.0), 61000.0)  # también en cortos
+    k.set_take_profit(Pos(-1, 0.01, 60000.0), 50000.0)
+    assert len(ex.created) == 4
+    for typ, side, *_, params in ex.created:
+        assert params.get("reduceOnly") is True, f"orden de salida sin reduceOnly: {typ} {side} {params}"
+
+
+def test_close_all_sends_a_reduce_only_market_order():
+    class WithPosition(FakeEx):
+        def cancel_all_orders(self, symbol):
+            self.orders = []
+
+        def fetch_positions(self, symbols):
+            return [{"contracts": 0.01, "side": "long", "entryPrice": 60000.0}]
+
+    ex = WithPosition([OLD_STOP])
+    _kraken(ex).close_all()
+    typ, side, *_, params = ex.created[-1]
+    assert (typ, side, params.get("reduceOnly")) == ("market", "sell", True)
+
+
+def test_stop_and_tp_params_become_reduce_only_orders_in_the_real_ccxt_request():
+    """Los params que manda KrakenPerp, pasados por el código REAL de ccxt, llevan reduceOnly en la request."""
+    import ccxt
+    ex = FakeEx([])
+    k = _kraken(ex)
+    k.set_stop(LONG, 59000.0)
+    k.set_take_profit(LONG, 70000.0)
+    c = ccxt.krakenfutures()
+    c.set_markets([_FAKE_MARKET])
+    stop_req = c.create_order_request("BTC/USD:USD", "market", "sell", 0.01, None, ex.created[0][4])
+    tp_req = c.create_order_request("BTC/USD:USD", "limit", "sell", 0.01, 70000.0, ex.created[1][4])
+    assert stop_req["reduceOnly"] is True and stop_req["orderType"] == "stp" and stop_req["stopPrice"] == "59000"
+    assert tp_req["reduceOnly"] is True and tp_req["orderType"] == "lmt"
+
+
+# --- id de orden verificable ---
+def test_order_id_is_extracted_defensively():
+    from phoenix.perps.exchange import _order_id
+    assert _order_id({"id": "a"}) == "a"
+    assert _order_id({"id": None, "info": {"order_id": "b"}}) == "b"
+    assert _order_id({"info": {"orderId": "c"}}) == "c"
+    assert _order_id({"info": {"orderEvents": [{"order": {"orderId": "d"}}]}}) == "d"
+    assert _order_id({"info": {"orderEvents": [{"orderPriorExecution": {"orderId": "e"}}]}}) == "e"
+    for bad in (None, {}, "x", {"id": None, "info": {}}, {"info": {"orderEvents": []}}, {"id": ""}):
+        assert _order_id(bad) is None
+
+
+def test_set_stop_accepts_an_id_found_only_in_the_raw_response():
+    ex = FakeEx([OLD_STOP], create_response={"id": None, "status": "open", "info": {"order_id": "raw-1"}})
+    _kraken(ex).set_stop(LONG, 59000.0)
+    assert ("cancel", "old") in ex.log  # confirmado por info.order_id: ya se puede retirar el anterior
+
+
+@pytest.mark.parametrize("response", [
+    {},                                                                                        # nada
+    {"id": None, "status": "rejected", "info": {"status": "invalidPrice", "orderEvents": []}},  # rechazo de ccxt sin id
+    {"id": "x1", "status": "rejected"},                                                         # id pero rechazada
+    {"id": "x2", "status": "canceled"},
+])
+def test_unverifiable_stop_is_a_placement_failure_and_keeps_the_previous_stop(response):
+    ex = FakeEx([OLD_STOP], create_response=response)
+    with pytest.raises(OrderNotConfirmed):
+        _kraken(ex).set_stop(LONG, 59000.0)
+    assert ("cancel", "old") not in ex.log and [o["id"] for o in ex.orders] == ["old"]
+
+
+def test_unconfirmed_take_profit_raises():
+    with pytest.raises(OrderNotConfirmed):
+        _kraken(FakeEx([], create_response={"id": None, "status": "rejected"})).set_take_profit(LONG, 70000.0)
+
+
+class ExchangeSim(FakeEx):
+    """ccxt simulado con posición y órdenes: lo justo para que KrakenPerp trabaje dentro de Bot."""
+
+    def __init__(self, equity=114.0, last=87000.0, stop_response=None):
+        super().__init__(balance={"info": {"accounts": {"flex": {"portfolioValue": str(equity)}}}, "total": {}})
+        self.last, self.pos, self.stop_response = last, None, stop_response
+
+    def fetch_ticker(self, symbol):
+        return {"last": self.last}
+
+    def set_leverage(self, lev, symbol):
+        pass
+
+    def fetch_positions(self, symbols):
+        return [] if self.pos is None else [self.pos]
+
+    def cancel_all_orders(self, symbol):
+        self.orders = []
+
+    def create_order(self, symbol, typ, side, amount, price, params):
+        self.created.append((typ, side, amount, price, dict(params)))
+        n = len(self.created)
+        if "stopLossPrice" in params:
+            if self.stop_response is not None:
+                return self.stop_response
+            o = {"id": f"stop{n}", "status": "open", "triggerPrice": params["stopLossPrice"]}
+            self.orders.append(o)
+            return o
+        if typ == "limit":
+            o = {"id": f"tp{n}", "status": "open", "price": price}
+            self.orders.append(o)
+            return o
+        if params.get("reduceOnly"):
+            self.pos = None
+        else:
+            self.pos = {"contracts": amount, "side": "long" if side == "buy" else "short", "entryPrice": self.last}
+        return {"id": f"mkt{n}", "status": "closed", "average": self.last}
+
+
+def _bot_on_sim(sim, tmp_path):
+    k = _kraken(sim)
+    c = _trend_candles()
+    sim.last = float(c["close"].iloc[-1])
+    return _bot_with(k, tmp_path), c, c.index[-1] + pd.Timedelta(hours=4)
+
+
+def test_end_to_end_unverifiable_stop_triggers_retries_and_fail_safe_close(tmp_path, no_sleep):
+    """Bot real + KrakenPerp real + ccxt simulado que rechaza el stop SIN id: reintentos y cierre a mercado."""
+    sim = ExchangeSim(stop_response={"id": None, "status": "rejected", "info": {"status": "invalidPrice", "orderEvents": []}})
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    assert bot.step(c, now=now) is False
+    assert sim.pos is None and bot.st.finished
+    stop_attempts = [x for x in sim.created if "stopLossPrice" in x[4]]
+    assert len(stop_attempts) == bot.cfg.stop_retries
+    typ, *_, params = sim.created[-1]
+    assert (typ, params.get("reduceOnly")) == ("market", True)  # el último envío es el cierre reduce-only
+
+
+def test_end_to_end_confirmed_stop_keeps_position_and_reconcile_is_idempotent(tmp_path, no_sleep):
+    sim = ExchangeSim()
+    bot, c, now = _bot_on_sim(sim, tmp_path)
+    assert bot.step(c, now=now) is True
+    assert sim.pos is not None and len(sim.orders) == 2  # un stop y un take profit
+    exits = [x for x in sim.created if "stopLossPrice" in x[4] or x[0] == "limit"]
+    assert exits and all(x[4].get("reduceOnly") is True for x in exits)
+    n = len(sim.created)
+    assert bot.step(c, now=now) is True and len(sim.created) == n  # mismo estado: no se duplica ninguna orden
