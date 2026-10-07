@@ -10,12 +10,13 @@ Cada 5 minutos, justo al empezar una ventana:
 Todo queda en logs/paper_btc5m.csv para comparar la simulación en vivo con el backtest.
 Uso: python -m phoenix.btc5m.paper --model btc5m_lgbm [--minutes 60]
 """
+
 from __future__ import annotations
 
 import argparse
 import csv
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -29,8 +30,23 @@ from phoenix.btc5m.polymarket import CLOB, GAMMA, get_json, parse_event
 ROOT = Path(__file__).resolve().parents[2]
 LOG = ROOT / "logs" / "paper_btc5m.csv"
 BINANCE = "https://data-api.binance.vision/api/v3/klines"
-FIELDS = ["start_utc", "slug", "p_up", "ask_up", "ask_up_size", "ask_down", "ask_down_size", "side", "price",
-          "shares", "exp_edge", "decided_at_s", "outcome_up", "won", "pnl"]
+FIELDS = [
+    "start_utc",
+    "slug",
+    "p_up",
+    "ask_up",
+    "ask_up_size",
+    "ask_down",
+    "ask_down_size",
+    "side",
+    "price",
+    "shares",
+    "exp_edge",
+    "decided_at_s",
+    "outcome_up",
+    "won",
+    "pnl",
+]
 
 
 def recent_klines(n: int = 1700) -> pd.DataFrame:
@@ -45,8 +61,23 @@ def recent_klines(n: int = 1700) -> pd.DataFrame:
             break
         rows = batch + rows
         end = batch[0][0] - 1
-    df = pd.DataFrame(rows, columns=["open_time", "open", "high", "low", "close", "volume", "close_time", "qv",
-                                     "trades", "taker_buy_base", "tbq", "ignore"])
+    df = pd.DataFrame(
+        rows,
+        columns=[
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "qv",
+            "trades",
+            "taker_buy_base",
+            "tbq",
+            "ignore",
+        ],
+    )
     df.index = pd.to_datetime(df["open_time"], unit="ms", utc=True)
     df = df[~df.index.duplicated()].sort_index()
     now_ms = int(time.time() * 1000)
@@ -91,7 +122,9 @@ def settle():
     if not LOG.exists():
         return
     df = pd.read_csv(LOG)
-    todo = df["outcome_up"].isna() & (pd.to_datetime(df["start_utc"]) + pd.Timedelta(minutes=7) < pd.Timestamp.now(tz="UTC"))
+    todo = df["outcome_up"].isna() & (
+        pd.to_datetime(df["start_utc"]) + pd.Timedelta(minutes=7) < pd.Timestamp.now(tz="UTC")
+    )
     for i in df.index[todo]:
         info = market(int(pd.Timestamp(df.at[i, "start_utc"]).timestamp()))
         if not info or info["outcome_up"] is None:
@@ -108,7 +141,9 @@ def settle():
 def run(model_name: str, minutes: float, stake: float, margin: float):
     booster, meta = load_model(model_name)
     deadline = time.time() + minutes * 60
-    print(f"Bot en simulación con {model_name} (entrenado hasta {meta.get('trained_until')}), apuesta {stake} $, margen {margin}")
+    print(
+        f"Bot en simulación con {model_name} (entrenado hasta {meta.get('trained_until')}), apuesta {stake} $, margen {margin}"
+    )
     while time.time() < deadline:
         now = time.time()
         start_ts = int(now // 300 + 1) * 300
@@ -119,9 +154,13 @@ def run(model_name: str, minutes: float, stake: float, margin: float):
         k = pd.concat([history, recent_klines(n=5)])
         k = k[~k.index.duplicated(keep="last")].sort_index()
         f = features_1m(k)
-        x = f.loc[[pd.Timestamp(start_ts - 60, unit="s", tz="UTC")], FEATURES] if pd.Timestamp(start_ts - 60, unit="s", tz="UTC") in f.index else None
-        row = {k_: "" for k_ in FIELDS}
-        row.update(start_utc=datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(), slug=f"btc-updown-5m-{start_ts}")
+        x = (
+            f.loc[[pd.Timestamp(start_ts - 60, unit="s", tz="UTC")], FEATURES]
+            if pd.Timestamp(start_ts - 60, unit="s", tz="UTC") in f.index
+            else None
+        )
+        row = dict.fromkeys(FIELDS, "")
+        row.update(start_utc=datetime.fromtimestamp(start_ts, tz=UTC).isoformat(), slug=f"btc-updown-5m-{start_ts}")
         if info is None or x is None or x.isna().any(axis=1).iloc[0]:
             print(f"{row['start_utc']}: sin mercado o sin datos")
             _append(row)
@@ -129,14 +168,23 @@ def run(model_name: str, minutes: float, stake: float, margin: float):
         p_up = float(booster.predict(x.to_numpy())[0])
         (a_up, s_up), (a_dn, s_dn) = best_ask(info["up_token"]), best_ask(info["down_token"])
         side, price, edge = decide(p_up, a_up, a_dn, margin)
-        row.update(p_up=round(p_up, 4), ask_up=a_up, ask_up_size=s_up, ask_down=a_dn, ask_down_size=s_dn,
-                   exp_edge=round(edge, 4), decided_at_s=round(time.time() - start_ts, 2))
+        row.update(
+            p_up=round(p_up, 4),
+            ask_up=a_up,
+            ask_up_size=s_up,
+            ask_down=a_dn,
+            ask_down_size=s_dn,
+            exp_edge=round(edge, 4),
+            decided_at_s=round(time.time() - start_ts, 2),
+        )
         if side:
             size_ok = (s_up if side == "Up" else s_dn) * price >= stake
             if size_ok:
                 row.update(side=side, price=price, shares=round(stake / price, 4))
-        print(f"{row['start_utc']}: p_up={p_up:.3f} ask_up={a_up} ask_down={a_dn} -> {row['side'] or 'no apuesta'} "
-              f"(decidido en {time.time() - t_dec:.1f} s)")
+        print(
+            f"{row['start_utc']}: p_up={p_up:.3f} ask_up={a_up} ask_down={a_dn} -> {row['side'] or 'no apuesta'} "
+            f"(decidido en {time.time() - t_dec:.1f} s)"
+        )
         _append(row)
         settle()
     settle()

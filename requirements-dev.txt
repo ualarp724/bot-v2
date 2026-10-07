@@ -1,0 +1,10 @@
+# Herramientas de desarrollo y CI: pytest, cobertura, lint/formato y auditoría de dependencias.
+# Instalar con:  pip install -r requirements-dev.txt   (incluye las dependencias de ejecución)
+-r requirements.txt
+
+# 8.4.2 tenía PYSEC-2026-1845 (corregido en 9.0.3).
+pytest==9.1.1
+pytest-cov==7.1.0
+# La versión de ruff está fijada porque `ruff format --check` es sensible a la versión.
+ruff==0.16.10
+pip-audit==2.10.1

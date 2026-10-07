@@ -9,6 +9,7 @@ Para cada mercado:
 4. Se apuesta al lado con más ventaja esperada si  p_lado - precio - comisión > margen.
 5. Cada apuesta es de `stake` USD: acciones = stake / precio. Si gana, cada acción paga 1 USD.
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -56,8 +57,15 @@ def prices_from_summary(summary_df: pd.DataFrame, window: tuple[int, int]) -> pd
     return summary_df.set_index("slug")[[f"px_up_{a}_{b}", f"px_down_{a}_{b}"]].set_axis(["px_up", "px_down"], axis=1)
 
 
-def simulate(markets: pd.DataFrame, p_up: pd.Series, prices: pd.DataFrame, *, margin: float = 0.02,
-             stake: float = 5.0, fee_rate: float = 0.07) -> pd.DataFrame:
+def simulate(
+    markets: pd.DataFrame,
+    p_up: pd.Series,
+    prices: pd.DataFrame,
+    *,
+    margin: float = 0.02,
+    stake: float = 5.0,
+    fee_rate: float = 0.07,
+) -> pd.DataFrame:
     """Una fila por apuesta. `markets` necesita slug, start_ts, outcome_up; `p_up` y `prices` indexados por slug."""
     df = markets.set_index("slug")[["start_ts", "outcome_up"]].join(p_up.rename("p_up")).join(prices)
     df = df.dropna(subset=["p_up", "outcome_up"])
@@ -86,10 +94,14 @@ def summary(bets: pd.DataFrame, stake: float = 5.0) -> dict:
     days = max((bets["time"].max() - bets["time"].min()).days, 1)
     daily = bets.groupby(bets["time"].dt.date)["pnl"].sum()
     return {
-        "bets": len(bets), "bets_per_day": len(bets) / days,
-        "win_rate_pct": 100 * bets["won"].mean(), "avg_price": bets["price"].mean(),
+        "bets": len(bets),
+        "bets_per_day": len(bets) / days,
+        "win_rate_pct": 100 * bets["won"].mean(),
+        "avg_price": bets["price"].mean(),
         "avg_expected_edge": bets["exp_edge"].mean(),
-        "pnl_usd": bets["pnl"].sum(), "roi_per_bet_pct": 100 * bets["pnl"].sum() / (stake * len(bets)),
+        "pnl_usd": bets["pnl"].sum(),
+        "roi_per_bet_pct": 100 * bets["pnl"].sum() / (stake * len(bets)),
         "days_positive_pct": 100 * (daily > 0).mean(),
-        "worst_day_usd": daily.min(), "max_dd_usd": float((daily.cumsum().cummax() - daily.cumsum()).max()),
+        "worst_day_usd": daily.min(),
+        "max_dd_usd": float((daily.cumsum().cummax() - daily.cumsum()).max()),
     }

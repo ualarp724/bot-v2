@@ -1,4 +1,4 @@
-# Entorno único del proyecto (Python 3.11).
+# Entorno de ejecución del proyecto (Python 3.11).
 # Versiones tomadas del antiguo venv_stable, solo con lo que usa el plan.
 numpy==2.4.2
 pandas==3.0.0
@@ -7,5 +7,7 @@ lightgbm==4.6.0
 joblib==1.5.3
 matplotlib==3.10.8
 optuna==4.7.0
-pytest==8.4.2
-ccxt==4.5.84
+# 4.5.85 es la versión contra la que se verificó la lógica de órdenes (reduceOnly, cliOrdId, parse_order).
+# ccxt fija sus propias dependencias transitivas con == (urllib3==2.8.0, multidict==6.7.1, certifi, ...),
+# así que no hace falta repetirlas aquí. Con 4.5.84 estaba urllib3 2.7.0 (PYSEC-2026-4175/4176/4177).
+ccxt==4.5.85

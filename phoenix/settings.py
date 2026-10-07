@@ -1,4 +1,5 @@
 """Carga la configuración del activo desde config/<símbolo>.json."""
+
 from __future__ import annotations
 
 import json

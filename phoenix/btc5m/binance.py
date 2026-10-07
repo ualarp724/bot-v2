@@ -4,6 +4,7 @@ Se descargan los meses completos y, para el mes en curso, los días sueltos.
 Índice = hora de APERTURA de la vela en UTC. Binance pasó de milisegundos a
 microsegundos en 2025; se detecta automáticamente.
 """
+
 from __future__ import annotations
 
 import subprocess
@@ -15,8 +16,20 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data" / "raw" / "binance_btcusdt_1m"
 BASE = "https://data.binance.vision/data/spot"
-COLS = ["open_time", "open", "high", "low", "close", "volume", "close_time", "quote_volume", "trades",
-        "taker_buy_base", "taker_buy_quote", "ignore"]
+COLS = [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "quote_volume",
+    "trades",
+    "taker_buy_base",
+    "taker_buy_quote",
+    "ignore",
+]
 
 
 def _get(url: str, dest: Path) -> bool:

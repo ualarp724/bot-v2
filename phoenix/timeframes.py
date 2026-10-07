@@ -6,6 +6,7 @@ la vela H1 se asigna a partir de esa vela base (y no desde las 10:00, que era la
 fuga de `legacy/core/mtf.py`). Una vela superior a medias (la actual en vivo) no
 se usa nunca: así backtest y vivo ven exactamente lo mismo.
 """
+
 from __future__ import annotations
 
 import numpy as np

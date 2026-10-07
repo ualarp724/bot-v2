@@ -1,4 +1,5 @@
 """Walk-forward: entrenar con N meses, validar los M siguientes y avanzar M meses."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,9 +7,19 @@ from dataclasses import dataclass
 import lightgbm as lgb
 import pandas as pd
 
-LGBM_PARAMS = dict(n_estimators=300, learning_rate=0.03, num_leaves=15, min_child_samples=200,
-                   subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
-                   random_state=42, verbose=-1, n_jobs=4)
+LGBM_PARAMS = {
+    "n_estimators": 300,
+    "learning_rate": 0.03,
+    "num_leaves": 15,
+    "min_child_samples": 200,
+    "subsample": 0.8,
+    "subsample_freq": 1,
+    "colsample_bytree": 0.8,
+    "reg_lambda": 1.0,
+    "random_state": 42,
+    "verbose": -1,
+    "n_jobs": 4,
+}
 
 
 @dataclass(frozen=True)
@@ -16,7 +27,7 @@ class Window:
     train_start: pd.Timestamp
     train_end: pd.Timestamp  # exclusivo
     val_start: pd.Timestamp
-    val_end: pd.Timestamp    # exclusivo
+    val_end: pd.Timestamp  # exclusivo
 
 
 def make_windows(start: pd.Timestamp, end: pd.Timestamp, train_months=18, val_months=3) -> list[Window]:

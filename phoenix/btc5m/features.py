@@ -10,13 +10,31 @@ Con velas de Binance, el objetivo `typ(s+4) >= typ(s-1)` coincide con el resulta
 Momento de decidir: `lag` = número de minutos antes del inicio de la ventana cuya vela es la
 última usada. lag=1 → se usa hasta la vela s-1, que cierra justo al inicio (decisión en s).
 """
+
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-FEATURES = ["r1", "r5", "r15", "r60", "r240", "vol60", "vol_ratio", "taker5", "taker60", "vol_rel5",
-            "pos60", "body5", "upwick5", "gap_ref", "hour_sin", "hour_cos", "dow"]
+FEATURES = [
+    "r1",
+    "r5",
+    "r15",
+    "r60",
+    "r240",
+    "vol60",
+    "vol_ratio",
+    "taker5",
+    "taker60",
+    "vol_rel5",
+    "pos60",
+    "body5",
+    "upwick5",
+    "gap_ref",
+    "hour_sin",
+    "hour_cos",
+    "dow",
+]
 
 
 def typical(m: pd.DataFrame) -> pd.Series:
@@ -51,7 +69,9 @@ def features_1m(m: pd.DataFrame) -> pd.DataFrame:
     return f[FEATURES]
 
 
-def features_at(m: pd.DataFrame, starts: pd.DatetimeIndex, lag: int = 1, f1: pd.DataFrame | None = None) -> pd.DataFrame:
+def features_at(
+    m: pd.DataFrame, starts: pd.DatetimeIndex, lag: int = 1, f1: pd.DataFrame | None = None
+) -> pd.DataFrame:
     """Features para ventanas que empiezan en `starts`, usando velas hasta s - lag minutos."""
     f1 = features_1m(m) if f1 is None else f1
     X = f1.reindex(starts - pd.Timedelta(minutes=lag))

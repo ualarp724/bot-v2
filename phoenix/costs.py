@@ -4,6 +4,7 @@ Precios de MT5 = BID. Una compra entra al ASK (bid + spread) y sale al BID;
 una venta entra al BID y sale al ASK. El spread se paga una vez por operación.
 Todo en USD por onza salvo que se diga lo contrario (1 lote = 100 oz).
 """
+
 from __future__ import annotations
 
 import math

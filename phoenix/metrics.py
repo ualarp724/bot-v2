@@ -1,4 +1,5 @@
 """Métricas de un backtest. Todo se calcula sobre operaciones cerradas."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -35,7 +36,7 @@ def summarize(trades: pd.DataFrame, capital: float) -> dict:
     sharpe = float(daily.mean() / daily.std() * np.sqrt(252)) if daily.std() > 0 else 0.0
     months = max((trades["exit_time"].max() - trades["entry_time"].min()).days / 30.44, 1e-9)
     return {
-        "trades": int(len(trades)),
+        "trades": len(trades),
         "win_rate_pct": 100.0 * len(wins) / len(pnl),
         "avg_r": float(trades["r"].mean()),
         "profit_factor": float(wins.sum() / -losses.sum()) if losses.sum() < 0 else float("inf"),

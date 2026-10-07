@@ -3,6 +3,7 @@
 Cada fila t usa información hasta el CIERRE de la vela t. La señal que salga de
 la fila t se ejecuta en la apertura de t+1 (ver backtest.py).
 """
+
 from __future__ import annotations
 
 import numpy as np
@@ -11,18 +12,35 @@ import pandas as pd
 from phoenix.timeframes import higher_tf_closed
 
 FEATURES = [
-    "ret_1", "ret_4", "ret_16", "ret_64",
-    "vol_regime", "natr",
-    "range_pos_32", "dist_ema50", "dist_ema200", "rsi_14",
-    "body", "upper_wick", "lower_wick", "tick_vol_rel",
-    "hour_sin", "hour_cos", "dow",
-    "h1_ret", "h1_dist_ema50", "h4_ret", "h4_dist_ema50",
+    "ret_1",
+    "ret_4",
+    "ret_16",
+    "ret_64",
+    "vol_regime",
+    "natr",
+    "range_pos_32",
+    "dist_ema50",
+    "dist_ema200",
+    "rsi_14",
+    "body",
+    "upper_wick",
+    "lower_wick",
+    "tick_vol_rel",
+    "hour_sin",
+    "hour_cos",
+    "dow",
+    "h1_ret",
+    "h1_dist_ema50",
+    "h4_ret",
+    "h4_dist_ema50",
 ]
 
 
 def atr(bars: pd.DataFrame, n: int = 14) -> pd.Series:
     prev = bars["close"].shift()
-    tr = pd.concat([bars["high"] - bars["low"], (bars["high"] - prev).abs(), (bars["low"] - prev).abs()], axis=1).max(axis=1)
+    tr = pd.concat([bars["high"] - bars["low"], (bars["high"] - prev).abs(), (bars["low"] - prev).abs()], axis=1).max(
+        axis=1
+    )
     return tr.rolling(n).mean()
 
 
@@ -39,10 +57,12 @@ def _htf_block(bars: pd.DataFrame, rule: str, prefix: str) -> pd.DataFrame:
     uniq = h[~h["close"].eq(h["close"].shift()) | h["open"].ne(h["open"].shift())].dropna()
     a = atr(uniq, 14)
     ema = uniq["close"].ewm(span=50, adjust=False).mean()
-    block = pd.DataFrame({
-        f"{prefix}_ret": (uniq["close"] - uniq["open"]) / a,
-        f"{prefix}_dist_ema50": (uniq["close"] - ema) / a,
-    })
+    block = pd.DataFrame(
+        {
+            f"{prefix}_ret": (uniq["close"] - uniq["open"]) / a,
+            f"{prefix}_dist_ema50": (uniq["close"] - ema) / a,
+        }
+    )
     return block.reindex(bars.index, method="ffill")
 
 
@@ -70,4 +90,4 @@ def build_features(bars: pd.DataFrame) -> pd.DataFrame:
     f["dow"] = ny.dayofweek
     f = f.join(_htf_block(bars, "1h", "h1")).join(_htf_block(bars, "4h", "h4"))
     f["atr"] = a  # no es feature del modelo: lo usan las estrategias para el SL
-    return f[FEATURES + ["atr"]]
+    return f[[*FEATURES, "atr"]]

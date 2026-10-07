@@ -2,6 +2,7 @@
 
 API pública sin clave; 300 velas por llamada. Se guarda por días en data/raw/coinbase_btcusd_1m/.
 """
+
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +19,12 @@ URL = "https://api.exchange.coinbase.com/products/BTC-USD/candles"
 
 def _chunk(a: pd.Timestamp) -> list:
     b = a + pd.Timedelta(minutes=299)
-    return get_json(URL, {"granularity": 60, "start": a.strftime("%Y-%m-%dT%H:%M:%SZ"), "end": b.strftime("%Y-%m-%dT%H:%M:%SZ")}) or []
+    return (
+        get_json(
+            URL, {"granularity": 60, "start": a.strftime("%Y-%m-%dT%H:%M:%SZ"), "end": b.strftime("%Y-%m-%dT%H:%M:%SZ")}
+        )
+        or []
+    )
 
 
 def download_day(day: pd.Timestamp) -> int:
@@ -29,7 +35,11 @@ def download_day(day: pd.Timestamp) -> int:
     starts = pd.date_range(day, day + pd.Timedelta(minutes=1439), freq="300min")
     with ThreadPoolExecutor(5) as ex:
         rows = [r for part in ex.map(_chunk, starts) for r in part]
-    df = pd.DataFrame(rows, columns=["time", "low", "high", "open", "close", "volume"]).drop_duplicates("time").sort_values("time")
+    df = (
+        pd.DataFrame(rows, columns=["time", "low", "high", "open", "close", "volume"])
+        .drop_duplicates("time")
+        .sort_values("time")
+    )
     df = df[(df.time >= day.timestamp()) & (df.time < (day + pd.Timedelta(days=1)).timestamp())]
     df.to_csv(path, index=False)
     return len(df)

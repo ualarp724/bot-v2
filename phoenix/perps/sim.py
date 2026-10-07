@@ -12,6 +12,7 @@ Supuestos (Kraken, clientes del EEE, septiembre de 2026):
 - Al llegar al objetivo (p. ej. 500 €) se cierra todo y se para. Si el capital baja del mínimo
   operable, también se para.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -31,15 +32,16 @@ class Costs:
 @dataclass
 class Plan:
     """Orden que una estrategia quiere ejecutar en la apertura de la vela siguiente."""
-    side: int                  # +1 largo, -1 corto, 0 cerrar
-    stop: float                # precio del stop
-    leverage: float            # nocional / capital deseado (se limita al máximo)
+
+    side: int  # +1 largo, -1 corto, 0 cerrar
+    stop: float  # precio del stop
+    leverage: float  # nocional / capital deseado (se limita al máximo)
 
 
 @dataclass
 class Position:
     side: int
-    qty: float                 # BTC
+    qty: float  # BTC
     entry: float
     stop: float
     liq: float
@@ -67,8 +69,17 @@ def _inside(stop: float, liq: float, side: int, buffer: float = 0.003) -> float:
     return max(stop, limit) if side == 1 else min(stop, limit)
 
 
-def run(bars4h: pd.DataFrame, strategy, start: pd.Timestamp, days: int = 30, capital: float = 100.0,
-        target: float = 500.0, min_equity: float = 5.0, costs: Costs = Costs(), rows: list | None = None) -> Result:
+def run(
+    bars4h: pd.DataFrame,
+    strategy,
+    start: pd.Timestamp,
+    days: int = 30,
+    capital: float = 100.0,
+    target: float = 500.0,
+    min_equity: float = 5.0,
+    costs: Costs = Costs(),
+    rows: list | None = None,
+) -> Result:
     """Simula una ventana de `days` días empezando en `start`. `strategy(state)` devuelve un Plan o None."""
     idx = bars4h.index
     rows = rows if rows is not None else bars4h.to_dict("records")
@@ -100,7 +111,9 @@ def run(bars4h: pd.DataFrame, strategy, start: pd.Timestamp, days: int = 30, cap
                     fill = px * (1 + pending.side * costs.slippage)
                     equity -= qty_target * fill * costs.taker
                     liq = liquidation_price(fill, pending.side, lev, costs)
-                    pos = Position(pending.side, qty_target, fill, _inside(pending.stop, liq, pending.side), liq, idx[i])
+                    pos = Position(
+                        pending.side, qty_target, fill, _inside(pending.stop, liq, pending.side), liq, idx[i]
+                    )
                 else:  # misma dirección: ajustar tamaño (piramidar) y stop
                     add = qty_target - pos.qty
                     if add > 0:
@@ -108,7 +121,9 @@ def run(bars4h: pd.DataFrame, strategy, start: pd.Timestamp, days: int = 30, cap
                         equity -= add * fill * costs.taker
                         pos.entry = (pos.entry * pos.qty + fill * add) / qty_target
                         pos.qty = qty_target
-                        pos.liq = liquidation_price(pos.entry, pos.side, min(pos.qty * px / mark_now, costs.max_leverage), costs)
+                        pos.liq = liquidation_price(
+                            pos.entry, pos.side, min(pos.qty * px / mark_now, costs.max_leverage), costs
+                        )
                     pos.stop = _inside(pending.stop, pos.liq, pos.side)
             pending = None
 
